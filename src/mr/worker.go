@@ -1,10 +1,16 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -12,6 +18,14 @@ import "hash/fnv"
 type KeyValue struct {
 	Key   string
 	Value string
+}
+
+type Worker struct {
+	Addr       string
+	Server     *net.Listener
+	TaskType   int
+	TaskNumber int
+	Task       string
 }
 
 //
@@ -24,18 +38,166 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
-func Worker(mapf func(string, string) []KeyValue,
+func WorkerF(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
+	workerServer, err := net.Listen("tcp", ":0")
+	if err != nil {
+		log.Fatalf("An error has occured while creating the worker! %v", err.Error())
+	}
+	worker := CreateWorker(workerServer.Addr().String(), WORKER_TASK_UNALLOCATED, "")
+	worker.Server = &workerServer
+	log.Printf("Worker Listening on %v", worker.Addr)
+	rpc.Register(&worker)
+	rpc.HandleHTTP()
+	go http.Serve(*worker.Server, nil)
+	CallConnect(worker.Addr)
+	for {
+		log.Printf("Calling Update Status!")
+		reply, err := CallUpdateStatus(worker, TASK_REQUEST)
+		log.Printf("Got Reply %v\n", reply)
+		if err != nil {
+			log.Fatalf(err.Error())
+		}
+		switch reply.TaskType {
+		case MAP:
+			worker.startMapping(reply, mapf)
+		case REDUCE:
+			worker.startReducing(reply, reducef)
+		}
+	}
+}
 
-	// Your worker implementation here.
+func (w *Worker) startMapping(data *UpdateStatusReply, mapf func(string, string) []KeyValue) {
+	w.TaskType = WORKER_MAP_TASK
+	w.Task = data.Filename
+	w.TaskNumber = data.TaskNumber
+	file, err := os.Open(w.Task)
+	defer file.Close()
+	if err != nil {
+		log.Fatalf("Cannot open file %v", w.Task)
+	}
+	content, err := ioutil.ReadFile(w.Task)
+	if err != nil {
+		log.Fatalf("Cannot read file!")
+	}
 
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	ikvs := mapf(w.Task, string(content))
+	ikvsP := w.startPartioning(ikvs, data.NReduce)
+	for i := 0; i < data.NReduce; i++ {
+		filename := WriteIntermediateFiles(w, ikvsP[i], i)
+		CallAddIntermediateFiles(filename, i)
+	}
+	_, err = CallUpdateStatus(*w, MAP_FINISH)
+	if err != nil {
+		log.Fatalf("An error has occured while finishing up the map task")
+	}
+	w.Task = ""
+	w.TaskType = WORKER_TASK_UNALLOCATED
+}
 
+func (w *Worker) startReducing(data *UpdateStatusReply, reducef func(string, []string) string) {
+	w.TaskType = WORKER_REDUCE_TASK
+}
+
+func (w *Worker) startPartioning(kv []KeyValue, nReduce int) [][]KeyValue {
+	kvs := make([][]KeyValue, nReduce)
+	for _, el := range kv {
+		v := ihash(el.Key) % nReduce
+		kvs[v] = append(kvs[v], el)
+	}
+	return kvs
+}
+
+func CreateWorker(addr string, taskType int, task string) (worker Worker) {
+	worker.Addr = addr
+	worker.Task = task
+	worker.TaskType = taskType
+	return
+}
+
+func (w *Worker) Ping(request *PingRequest, reply *PingResponse) error {
+	reply.Success = true
+	return nil
+}
+
+func CallUpdateStatus(w Worker, taskType int) (*UpdateStatusReply, error) {
+	request := &UpdateStatusRequest{
+		Addr: w.Addr,
+	}
+	switch taskType {
+	case TASK_REQUEST:
+		request.Type = TASK_REQUEST
+		reply := UpdateStatusReply{}
+		ok := callCoordinator("Coordinator.UpdateStatus", request, &reply)
+		if ok {
+			return &reply, nil
+		} else {
+			return nil, fmt.Errorf("An error has occured while requesting a task!")
+		}
+	case MAP_FINISH:
+		request.Type = MAP_FINISH
+		request.Task = w.Task
+		reply := &UpdateStatusReply{}
+		ok := callCoordinator("Coordinator.UpdateStatus", request, reply)
+		if ok {
+			return reply, nil
+		} else {
+			return nil, fmt.Errorf("An error has occured while reporting a finished map task!")
+		}
+	case REDUCE_FINISH:
+		request.Type = REDUCE_FINISH
+		request.Task = w.Task
+		reply := &UpdateStatusReply{}
+		ok := callCoordinator("Coordinator.UpdateStatus", request, reply)
+		if ok {
+			return reply, nil
+		} else {
+			return nil, fmt.Errorf("An error has occured while reporting a finished reduce task!")
+		}
+	}
+	return nil, fmt.Errorf("No Known Task Type")
+}
+
+func CallAddIntermediateFiles(filename string, taskIdx int) {
+	request := IntermediateFileRequest{
+		Filename:   filename,
+		TaskNumber: taskIdx,
+	}
+	reply := IntermediateFileReply{}
+	ok := callCoordinator("Coordinator.AddIntermediateFiles", request, &reply)
+	if !ok {
+		log.Fatalf("An error has occured while adding intermediate files!")
+	}
+}
+
+func CallConnect(addr string) {
+	request := ConnectionRequest{
+		Addr: addr,
+	}
+	reply := ConnectionReply{}
+	ok := callCoordinator("Coordinator.Connect", request, &reply)
+	if !ok {
+		log.Fatalln("Failed to connect")
+	}
+}
+
+func WriteIntermediateFiles(w *Worker, ikvs []KeyValue, taskIdx int) (filename string) {
+	filename = fmt.Sprintf("mr-out-%v-%v", w.TaskNumber, taskIdx)
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Cannot Create/Open MR-OUT-# Intermediate File: %v", err.Error())
+	}
+	enc := json.NewEncoder(file)
+	for _, kv := range ikvs {
+		err := enc.Encode(&kv)
+		if err != nil {
+			log.Fatalf("An error has occured while encoding kv pair: %v", err.Error())
+		}
+	}
+	return
 }
 
 //
@@ -58,7 +220,7 @@ func CallExample() {
 	// the "Coordinator.Example" tells the
 	// receiving server that we'd like to call
 	// the Example() method of struct Coordinator.
-	ok := call("Coordinator.Example", &args, &reply)
+	ok := callCoordinator("Coordinator.Example", &args, &reply)
 	if ok {
 		// reply.Y should be 100.
 		fmt.Printf("reply.Y %v\n", reply.Y)
@@ -72,7 +234,7 @@ func CallExample() {
 // usually returns true.
 // returns false if something goes wrong.
 //
-func call(rpcname string, args interface{}, reply interface{}) bool {
+func callCoordinator(rpcname string, args interface{}, reply interface{}) bool {
 	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
