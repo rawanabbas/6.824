@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"sort"
 )
 
 //
@@ -19,6 +20,12 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type ByKey []KeyValue
+
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 type Worker struct {
 	Addr       string
@@ -53,11 +60,12 @@ func WorkerF(mapf func(string, string) []KeyValue,
 	rpc.Register(&worker)
 	rpc.HandleHTTP()
 	go http.Serve(*worker.Server, nil)
+	log.Println("x")
 	CallConnect(worker.Addr)
+	log.Println("y")
 	for {
 		log.Printf("Calling Update Status!")
 		reply, err := CallUpdateStatus(worker, TASK_REQUEST)
-		log.Printf("Got Reply %v\n", reply)
 		if err != nil {
 			log.Fatalf(err.Error())
 		}
@@ -100,6 +108,46 @@ func (w *Worker) startMapping(data *UpdateStatusReply, mapf func(string, string)
 
 func (w *Worker) startReducing(data *UpdateStatusReply, reducef func(string, []string) string) {
 	w.TaskType = WORKER_REDUCE_TASK
+	w.TaskNumber = data.TaskNumber
+	var intermediateValues []KeyValue
+	var temp []KeyValue
+	for _, rFilename := range data.ReduceFileList {
+		iFile, err := os.Open(rFilename)
+		defer iFile.Close()
+		if err != nil {
+			log.Fatalf("An error has occured while opening intermediate value file: %v", err.Error())
+		}
+		bytes, _ := ioutil.ReadAll(iFile)
+		json.Unmarshal(bytes, &temp)
+		log.Printf("Filename %v Temp Length %v", rFilename, len(temp))
+		intermediateValues = append(intermediateValues, temp...)
+	}
+	log.Printf("Intermediate Values: %v", len(intermediateValues))
+	sort.Sort(ByKey(intermediateValues))
+	filename := fmt.Sprintf("mr-out-%v", w.TaskNumber)
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
+	defer file.Close()
+	if err != nil {
+		log.Fatalf("An error has occured while creating the output file: %v", err.Error())
+	}
+
+	preReduceInterValues := make(map[string][]string)
+
+	for _, kv := range intermediateValues {
+		preReduceInterValues[kv.Key] = append(preReduceInterValues[kv.Key], kv.Value)
+	}
+
+	for key, values := range preReduceInterValues {
+		out := reducef(key, values)
+		log.Printf("Out %v", out)
+		_, err := file.WriteString(fmt.Sprintf("%v %v\n", key, out))
+		if err != nil {
+			log.Fatalf("An error has occured while writing the output file: %v", err.Error())
+		}
+	}
+
+	CallUpdateStatus(*w, REDUCE_FINISH)
+
 }
 
 func (w *Worker) startPartioning(kv []KeyValue, nReduce int) [][]KeyValue {
@@ -191,12 +239,7 @@ func WriteIntermediateFiles(w *Worker, ikvs []KeyValue, taskIdx int) (filename s
 		log.Fatalf("Cannot Create/Open MR-OUT-# Intermediate File: %v", err.Error())
 	}
 	enc := json.NewEncoder(file)
-	for _, kv := range ikvs {
-		err := enc.Encode(&kv)
-		if err != nil {
-			log.Fatalf("An error has occured while encoding kv pair: %v", err.Error())
-		}
-	}
+	enc.Encode(ikvs)
 	return
 }
 
