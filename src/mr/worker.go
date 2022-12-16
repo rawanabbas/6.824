@@ -11,6 +11,7 @@ import (
 	"net/rpc"
 	"os"
 	"sort"
+	"strconv"
 )
 
 //
@@ -56,18 +57,20 @@ func WorkerF(mapf func(string, string) []KeyValue,
 	}
 	worker := CreateWorker(workerServer.Addr().String(), WORKER_TASK_UNALLOCATED, "")
 	worker.Server = &workerServer
-	log.Printf("Worker Listening on %v", worker.Addr)
+	// log.Printf("Worker Listening on %v", worker.Addr)
 	rpc.Register(&worker)
 	rpc.HandleHTTP()
 	go http.Serve(*worker.Server, nil)
-	log.Println("x")
 	CallConnect(worker.Addr)
-	log.Println("y")
 	for {
-		log.Printf("Calling Update Status!")
+		// log.Printf("Calling Update Status!")
 		reply, err := CallUpdateStatus(worker, TASK_REQUEST)
 		if err != nil {
-			log.Fatalf(err.Error())
+			log.Printf(err.Error())
+			break
+		}
+		if reply.TaskType == TASKS_DONE {
+			break
 		}
 		switch reply.TaskType {
 		case MAP:
@@ -109,6 +112,7 @@ func (w *Worker) startMapping(data *UpdateStatusReply, mapf func(string, string)
 func (w *Worker) startReducing(data *UpdateStatusReply, reducef func(string, []string) string) {
 	w.TaskType = WORKER_REDUCE_TASK
 	w.TaskNumber = data.TaskNumber
+	w.Task = strconv.Itoa(data.Task)
 	var intermediateValues []KeyValue
 	var temp []KeyValue
 	for _, rFilename := range data.ReduceFileList {
@@ -119,10 +123,10 @@ func (w *Worker) startReducing(data *UpdateStatusReply, reducef func(string, []s
 		}
 		bytes, _ := ioutil.ReadAll(iFile)
 		json.Unmarshal(bytes, &temp)
-		log.Printf("Filename %v Temp Length %v", rFilename, len(temp))
+		// log.Printf("Filename %v Temp Length %v", rFilename, len(temp))
 		intermediateValues = append(intermediateValues, temp...)
 	}
-	log.Printf("Intermediate Values: %v", len(intermediateValues))
+	// log.Printf("Intermediate Values: %v", len(intermediateValues))
 	sort.Sort(ByKey(intermediateValues))
 	filename := fmt.Sprintf("mr-out-%v", w.TaskNumber)
 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
@@ -139,7 +143,7 @@ func (w *Worker) startReducing(data *UpdateStatusReply, reducef func(string, []s
 
 	for key, values := range preReduceInterValues {
 		out := reducef(key, values)
-		log.Printf("Out %v", out)
+		// log.Printf("Out %v", out)
 		_, err := file.WriteString(fmt.Sprintf("%v %v\n", key, out))
 		if err != nil {
 			log.Fatalf("An error has occured while writing the output file: %v", err.Error())

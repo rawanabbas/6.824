@@ -16,11 +16,12 @@ import (
 // and reply for an RPC.
 //
 
-const TASK_REQUEST = 0
-const REDUCE_FINISH = 1
-const MAP_FINISH = 2
-const MAP = 3
-const REDUCE = 4
+const TASK_REQUEST = 1
+const REDUCE_FINISH = 2
+const MAP_FINISH = 3
+const MAP = 4
+const REDUCE = 5
+const TASKS_DONE = 6
 
 type ExampleArgs struct {
 	X int
@@ -58,6 +59,7 @@ type UpdateStatusReply struct {
 	TaskType       int
 	ReduceFileList []string
 	TaskNumber     int
+	Task           int
 }
 
 type IntermediateFileRequest struct {

@@ -36,28 +36,29 @@ type Coordinator struct {
 	workers             map[string]*Worker
 	mapTasks            chan string
 	reduceTasks         chan int
+	jobsCompleted       chan bool
 }
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) Connect(request *ConnectionRequest, reply *ConnectionReply) error {
 	log.Printf("Recieved a Connection Request from a Worker %v", request.Addr)
-	c.mtx.RLock()
+	c.mtx.Lock()
 	worker := CreateWorker(request.Addr, WORKER_TASK_UNALLOCATED, "")
 	c.workers[request.Addr] = &worker
-	c.mtx.RUnlock()
+	c.mtx.Unlock()
 	reply.Success = true
 	return nil
 }
 
 func (c *Coordinator) UpdateStatus(request *UpdateStatusRequest, reply *UpdateStatusReply) error {
-	log.Printf("Received UpdateStatus Request")
+	// log.Printf("Received UpdateStatus Request")
 	msgType := request.Type
 	switch msgType {
 	case TASK_REQUEST:
-		log.Println("Task Request!")
+		// log.Println("Task Request!")
 		select {
 		case filename := <-c.mapTasks:
-			log.Println("A New Map Task")
+			// log.Println("A New Map Task")
 			reply.TaskType = MAP
 			reply.Filename = filename
 			c.mtx.Lock()
@@ -70,36 +71,40 @@ func (c *Coordinator) UpdateStatus(request *UpdateStatusRequest, reply *UpdateSt
 			worker.Task = filename
 			c.mtx.Unlock()
 		case reduceIdx := <-c.reduceTasks:
-			log.Println(">>>>>>>>>>>>>New Reduce Task")
+			// log.Println(">>>>>>>>>>>>>New Reduce Task")
 			reply.TaskType = REDUCE
-			c.mtx.RLock()
+			c.mtx.Lock()
 			reply.NReduce = c.nReduce
 			reply.ReduceFileList = c.intermediateFiles[reduceIdx]
 			reply.TaskNumber = c.rTaskNumber
+			reply.Task = reduceIdx
 			c.rTaskNumber++
 			c.reduceTaskStatus[reduceIdx] = InProgress
 			worker := c.workers[request.Addr]
 			worker.TaskType = WORKER_REDUCE_TASK
 			worker.Task = strconv.Itoa(reduceIdx)
-			c.mtx.RUnlock()
+			c.mtx.Unlock()
+		case <-c.jobsCompleted:
+			log.Printf("No More Jobs Terminate Worker")
+			reply.TaskType = TASKS_DONE
 		}
 	case MAP_FINISH:
-		log.Println("***************Mapping Finished!")
-		c.mtx.RLock()
+		// log.Println("***************Mapping Finished!")
+		c.mtx.Lock()
 		worker := c.workers[request.Addr]
 		worker.TaskType = WORKER_TASK_UNALLOCATED
 		worker.Task = ""
 		c.filenames[request.Task] = Completed
-		c.mtx.RUnlock()
+		c.mtx.Unlock()
 	case REDUCE_FINISH:
 		log.Println("+++++Reducing Finished!")
-		c.mtx.RLock()
+		c.mtx.Lock()
 		worker := c.workers[request.Addr]
 		worker.TaskType = WORKER_TASK_UNALLOCATED
 		worker.Task = ""
 		idx, _ := strconv.Atoi(request.Task)
 		c.reduceTaskStatus[idx] = Completed
-		c.mtx.RUnlock()
+		c.mtx.Unlock()
 	}
 	return nil
 }
@@ -107,8 +112,9 @@ func (c *Coordinator) UpdateStatus(request *UpdateStatusRequest, reply *UpdateSt
 func (c *Coordinator) AddIntermediateFiles(request *IntermediateFileRequest, reply *IntermediateFileReply) error {
 	taskNumber := request.TaskNumber
 	filename := request.Filename
-
+	c.mtx.Lock()
 	c.intermediateFiles[taskNumber] = append(c.intermediateFiles[taskNumber], filename)
+	c.mtx.Unlock()
 	reply.Success = true
 	return nil
 
@@ -147,10 +153,9 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
+	c.mtx.RLock()
+	ret := c.reduceTasksFinished
+	c.mtx.RUnlock()
 	return ret
 }
 
@@ -171,6 +176,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.nReduce = nReduce
 	c.reduceTaskStatus = make([]int, nReduce)
 	c.intermediateFiles = make([][]string, nReduce)
+	c.jobsCompleted = make(chan bool)
 	c.rTaskNumber = 0
 	c.mTaskNumber = 0
 	c.mtx = new(sync.RWMutex)
@@ -207,20 +213,29 @@ func (c *Coordinator) generateTasks() {
 			c.mapTasks <- filename
 		}
 	}
-
-	for !c.mapTasksFinished {
-		c.mapTasksFinished = c.areMapTasksDone()
+	done := false
+	for !done {
+		done = c.areMapTasksDone()
 	}
-	log.Println("Generating Reduce Tasks")
+	c.mtx.Lock()
+	c.mapTasksFinished = true
+	c.mtx.Unlock()
+	// log.Println("Generating Reduce Tasks")
 	// Generate Reduce Tasks
 	for i := range tskCopy {
 		if tskCopy[i] == Idle {
 			c.reduceTasks <- i
 		}
 	}
-	for !c.reduceTasksFinished {
-		c.reduceTasksFinished = c.areReduceTasksDone()
+	done = false
+	for !done {
+		done = c.areReduceTasksDone()
 	}
+	log.Printf("All Reduce Tasks are Done")
+	c.jobsCompleted <- true
+	c.mtx.Lock()
+	c.reduceTasksFinished = true
+	c.mtx.Unlock()
 }
 
 func (c *Coordinator) areMapTasksDone() (done bool) {
@@ -254,7 +269,7 @@ func (c *Coordinator) areReduceTasksDone() (done bool) {
 	for _, status := range tskCopy {
 		if status != Completed {
 			done = false
-			break
+			return
 		}
 		done = true
 	}
@@ -293,15 +308,16 @@ func (c *Coordinator) startHeartbeatForWorkers() {
 func callWorker(addr string, rpcname string, args interface{}, reply interface{}) bool {
 	c, err := rpc.DialHTTP("tcp", addr)
 	if err != nil {
-		log.Fatal("dialing:", err)
-	}
-	defer c.Close()
+		log.Printf("dialing error: %v", err.Error())
+	} else {
+		defer c.Close()
 
-	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
+		err = c.Call(rpcname, args, reply)
+		if err == nil {
+			return true
+		}
 
-	fmt.Println(err)
+		fmt.Println(err)
+	}
 	return false
 }
