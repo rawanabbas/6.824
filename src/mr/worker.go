@@ -127,27 +127,30 @@ func (w *Worker) startReducing(data *UpdateStatusReply, reducef func(string, []s
 		intermediateValues = append(intermediateValues, temp...)
 	}
 	// log.Printf("Intermediate Values: %v", len(intermediateValues))
-	sort.Sort(ByKey(intermediateValues))
 	filename := fmt.Sprintf("mr-out-%v", w.TaskNumber)
-	file, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
+	file, err := os.Create(filename)
 	defer file.Close()
 	if err != nil {
 		log.Fatalf("An error has occured while creating the output file: %v", err.Error())
 	}
 
-	preReduceInterValues := make(map[string][]string)
-
-	for _, kv := range intermediateValues {
-		preReduceInterValues[kv.Key] = append(preReduceInterValues[kv.Key], kv.Value)
-	}
-
-	for key, values := range preReduceInterValues {
-		out := reducef(key, values)
-		// log.Printf("Out %v", out)
-		_, err := file.WriteString(fmt.Sprintf("%v %v\n", key, out))
-		if err != nil {
-			log.Fatalf("An error has occured while writing the output file: %v", err.Error())
+	sort.Sort(ByKey(intermediateValues))
+	i := 0
+	for i < len(intermediateValues) {
+		j := i + 1
+		for j < len(intermediateValues) && intermediateValues[j].Key == intermediateValues[i].Key {
+			j++
 		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediateValues[k].Value)
+		}
+		output := reducef(intermediateValues[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(file, "%v %v\n", intermediateValues[i].Key, output)
+
+		i = j
 	}
 
 	CallUpdateStatus(*w, REDUCE_FINISH)
@@ -236,9 +239,9 @@ func CallConnect(addr string) {
 	}
 }
 
-func WriteIntermediateFiles(w *Worker, ikvs []KeyValue, taskIdx int) (filename string) {
-	filename = fmt.Sprintf("mr-out-%v-%v", w.TaskNumber, taskIdx)
-	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+func WriteIntermediateFiles(w *Worker, ikvs []KeyValue, reduceTaskIdx int) (filename string) {
+	filename = fmt.Sprintf("mr-%v-%v", w.TaskNumber, reduceTaskIdx)
+	file, err := os.Create(filename)
 	if err != nil {
 		log.Fatalf("Cannot Create/Open MR-OUT-# Intermediate File: %v", err.Error())
 	}
