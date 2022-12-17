@@ -2,8 +2,6 @@
 My self learning journey through MIT 6824 Distributed Systems Course
 
 # TODO
-- [ ] Map Reduce
-  - [x] ~Pass Crash Test~
-  - [ ] Change Map into sync.Map for cleaner synchronization
+- [x] ~Map Reduce~
 - [ ] Raft
 - [ ] Fault-tolerant Key/Value Service
