@@ -11,3 +11,5 @@ mrtmp.*
 /main/mrsequential
 /main/mrworker
 main/mr-out-*
+*/logs
+*.bak

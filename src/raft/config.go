@@ -8,20 +8,27 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
-import "6.824/labrpc"
-import "bytes"
-import "log"
-import "sync"
-import "sync/atomic"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+// import "../labgob"
+import (
+	"bytes"
+	"log"
+	"math/rand"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	// "../labgob"
+	"6.824-2022/labrpc"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"time"
+
+	"6.824-2022/labgob"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -141,17 +148,17 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 	err_msg := ""
 	v := m.Command
 	for j := 0; j < len(cfg.logs); j++ {
-		if old, oldok := cfg.logs[j][m.CommandIndex]; oldok && old != v {
+		if old, oldok := cfg.logs[j][int(m.CommandIndex)]; oldok && old != v {
 			log.Printf("%v: log %v; server %v\n", i, cfg.logs[i], cfg.logs[j])
 			// some server has already committed a different value for this entry!
 			err_msg = fmt.Sprintf("commit index=%v server=%v %v != server=%v %v",
 				m.CommandIndex, i, m.Command, j, old)
 		}
 	}
-	_, prevok := cfg.logs[i][m.CommandIndex-1]
-	cfg.logs[i][m.CommandIndex] = v
-	if m.CommandIndex > cfg.maxIndex {
-		cfg.maxIndex = m.CommandIndex
+	_, prevok := cfg.logs[i][int(m.CommandIndex)-1]
+	cfg.logs[i][int(m.CommandIndex)] = v
+	if int(m.CommandIndex) > cfg.maxIndex {
+		cfg.maxIndex = int(m.CommandIndex)
 	}
 	return err_msg, prevok
 }
@@ -226,7 +233,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 				cfg.mu.Unlock()
 			}
 		} else if m.CommandValid {
-			if m.CommandIndex != cfg.lastApplied[i]+1 {
+			if int(m.CommandIndex) != cfg.lastApplied[i]+1 {
 				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
 			}
 
@@ -241,7 +248,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			}
 
 			cfg.mu.Lock()
-			cfg.lastApplied[i] = m.CommandIndex
+			cfg.lastApplied[i] = int(m.CommandIndex)
 			cfg.mu.Unlock()
 
 			if (m.CommandIndex+1)%SnapShotInterval == 0 {
@@ -249,11 +256,11 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 				e := labgob.NewEncoder(w)
 				e.Encode(m.CommandIndex)
 				var xlog []interface{}
-				for j := 0; j <= m.CommandIndex; j++ {
+				for j := 0; j <= int(m.CommandIndex); j++ {
 					xlog = append(xlog, cfg.logs[i][j])
 				}
 				e.Encode(xlog)
-				rf.Snapshot(m.CommandIndex, w.Bytes())
+				rf.Snapshot(int(m.CommandIndex), w.Bytes())
 			}
 		} else {
 			// Ignore other types of ApplyMsg.
@@ -267,13 +274,11 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 	}
 }
 
-//
 // start or re-start a Raft.
 // if one already exists, "kill" it first.
 // allocate new outgoing port file names, and a new
 // state persister, to isolate previous instance of
 // this server. since we cannot really kill it.
-//
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	cfg.crash1(i)
 
@@ -422,13 +427,11 @@ func (cfg *config) setlongreordering(longrel bool) {
 	cfg.net.LongReordering(longrel)
 }
 
-//
 // check that one of the connected servers thinks
 // it is the leader, and that no other connected
 // server thinks otherwise.
 //
 // try a few times in case re-elections are needed.
-//
 func (cfg *config) checkOneLeader() int {
 	for iters := 0; iters < 10; iters++ {
 		ms := 450 + (rand.Int63() % 100)
@@ -438,7 +441,7 @@ func (cfg *config) checkOneLeader() int {
 		for i := 0; i < cfg.n; i++ {
 			if cfg.connected[i] {
 				if term, leader := cfg.rafts[i].GetState(); leader {
-					leaders[term] = append(leaders[term], i)
+					leaders[int(term)] = append(leaders[int(term)], i)
 				}
 			}
 		}
@@ -468,8 +471,8 @@ func (cfg *config) checkTerms() int {
 		if cfg.connected[i] {
 			xterm, _ := cfg.rafts[i].GetState()
 			if term == -1 {
-				term = xterm
-			} else if term != xterm {
+				term = int(xterm)
+			} else if term != int(xterm) {
 				cfg.t.Fatalf("servers disagree on term")
 			}
 		}
@@ -477,10 +480,8 @@ func (cfg *config) checkTerms() int {
 	return term
 }
 
-//
 // check that none of the connected servers
 // thinks it is the leader.
-//
 func (cfg *config) checkNoLeader() {
 	for i := 0; i < cfg.n; i++ {
 		if cfg.connected[i] {
@@ -532,7 +533,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 		}
 		if startTerm > -1 {
 			for _, r := range cfg.rafts {
-				if t, _ := r.GetState(); t > startTerm {
+				if t, _ := r.GetState(); int(t) > startTerm {
 					// someone has moved on
 					// can no longer guarantee that we'll "win"
 					return -1
