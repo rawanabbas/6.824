@@ -793,7 +793,7 @@ func (rf *Raft) electionTicker() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	SetDebug(true)
+	// SetDebug(true)
 	// SetVerbose(true)
 	rf := &Raft{}
 	rf.peers = peers
