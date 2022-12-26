@@ -29,7 +29,7 @@ func init() {
 		fmt.Println("Error reading given path: ", err.Error())
 	}
 
-	logger, _ = os.OpenFile(fmt.Sprintf("%v/logs.txt", path), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
+	logger, _ = os.OpenFile(fmt.Sprintf("%v/logs", path), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
 
 	mwOut := io.MultiWriter(os.Stdout, logger)
 	mwErr := io.MultiWriter(os.Stderr, logger)
@@ -40,11 +40,11 @@ func init() {
 	red = color.New(color.FgRed).SprintFunc()
 	blue = color.New(color.FgBlue).SprintFunc()
 
-	Out = log.New(mwOut, "", log.Ltime|log.Lmicroseconds|log.Lshortfile)
-	Error = log.New(mwErr, red("ERROR: "), log.Ltime|log.Lmicroseconds|log.Lshortfile)
-	Warn = log.New(mwErr, yellow("WARN: "), log.Ltime|log.Lmicroseconds|log.Lshortfile)
-	Debug = log.New(mwDebug, blue("DEBUG: "), log.Ltime|log.Lmicroseconds|log.Lshortfile)
-	Verbose = log.New(mwVerbose, blue("Verbose: "), log.Ltime|log.Lmicroseconds|log.Lshortfile)
+	Out = log.New(mwOut, "OUT: ", log.Ltime|log.Lshortfile)
+	Error = log.New(mwErr, red("ERROR: "), log.Ltime|log.Lshortfile)
+	Warn = log.New(mwErr, yellow("WARN: "), log.Ltime|log.Lshortfile)
+	Debug = log.New(mwDebug, blue("DEBUG: "), log.Ltime|log.Lshortfile)
+	Verbose = log.New(mwVerbose, blue("VERBOSE: "), log.Ltime|log.Lshortfile)
 }
 
 func SetDebug(enabled bool) {

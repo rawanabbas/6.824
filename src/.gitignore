@@ -13,3 +13,4 @@ mrtmp.*
 main/mr-out-*
 */logs
 *.bak
+*.log

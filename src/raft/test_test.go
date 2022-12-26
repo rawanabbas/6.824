@@ -85,7 +85,7 @@ func TestReElection2A(t *testing.T) {
 	cfg.t.Logf("============= disconnecting %v", (leader2+1)%servers)
 	cfg.disconnect((leader2 + 1) % servers)
 	cfg.t.Logf("============= sleeping")
-	time.Sleep(2 * RaftElectionTimeout)
+	time.Sleep(1 * RaftElectionTimeout)
 	cfg.t.Logf("============= woke up")
 
 	// check that the one connected server
@@ -96,6 +96,7 @@ func TestReElection2A(t *testing.T) {
 	// if a quorum arises, it should elect a leader.
 	cfg.t.Logf("============= connecting %v", (leader2+1)%servers)
 	cfg.connect((leader2 + 1) % servers)
+	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkOneLeader()
 	cfg.t.Logf("============= checked one leader")
 

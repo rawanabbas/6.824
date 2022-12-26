@@ -218,26 +218,26 @@ func (rf *Raft) getStateString() string {
 	var state string
 	switch rf.state.Load() {
 	case Follower:
-		state = "Follower"
+		state = " Follower  "
 	case Candidate:
-		state = "Candidate"
+		state = " Candidate "
 	case Leader:
-		state = "Leader"
+		state = " Leader    "
 	}
 	return state
 }
 
 func (rf *Raft) lock() {
 	if isVerbose {
-		buf := make([]byte, 10000)
-		runtime.Stack(buf, false)
-		rf.Verbose("Locking, stack: %v", string(buf))
+		// buf := make([]byte, 10000)
+		// runtime.Stack(buf, false)
+		// rf.Verbose("Locking, stack: %v", string(buf))
 	}
 	rf.mu.Lock()
 }
 
 func (rf *Raft) unlock() {
-	rf.Verbose("Unlocking")
+	// rf.Verbose("Unlocking")
 	rf.mu.Unlock()
 }
 func (rf *Raft) lockTimer() {
@@ -340,7 +340,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			r := resp.(*RequestVoteReply)
 			reply.Term = r.Term
 			reply.VoteGranted = r.VoteGranted
-			rf.Out("ResponseXXX: %v", reply)
+			rf.Out("Reply: %v", reply)
 			return
 		}
 	}
@@ -414,6 +414,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, reply *AppendEntriesReply) {
+	rf.Verbose("sendAppendEntries to %v", server)
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, &reply)
 	if !ok {
 		return
@@ -537,30 +538,30 @@ func (rf *Raft) broadcastVoteRequest() {
 
 	votesGranted := 1
 	votes := 1
-	// go func() {
-	for {
-		select {
-		case vote := <-results:
-			rf.Debug("Received a reply!!! %v", vote)
-			votes++
-			if vote {
-				votesGranted++
-			}
-			rf.Debug("Votes Granted so far: %v, Cutoff: %v", votesGranted, len(rf.peers)/2+1)
-			if votesGranted >= len(rf.peers)/2+1 {
-				evt := rf.createEvent(EVENT_END_ELECTIONS, true, nil)
-				rf.emit(evt, true)
-				return
-			}
+	go func() {
+		for {
+			select {
+			case vote := <-results:
+				rf.Debug("Received a reply!!! %v", vote)
+				votes++
+				if vote {
+					votesGranted++
+				}
+				rf.Debug("Votes Granted so far: %v, Cutoff: %v", votesGranted, len(rf.peers)/2+1)
+				if votesGranted >= len(rf.peers)/2+1 {
+					evt := rf.createEvent(EVENT_END_ELECTIONS, true, nil)
+					rf.emit(evt, false)
+					return
+				}
 
-			if votes >= len(rf.peers)/2+1 {
-				evt := rf.createEvent(EVENT_END_ELECTIONS, false, nil)
-				rf.emit(evt, true)
-				return
+				if votes >= len(rf.peers)/2+1 {
+					evt := rf.createEvent(EVENT_END_ELECTIONS, false, nil)
+					rf.emit(evt, false)
+					return
+				}
 			}
 		}
-	}
-	// }()@
+	}()
 }
 
 func (rf *Raft) areLogsUptoDate(cLastIndex int, cLastTerm int32) bool {
@@ -616,12 +617,20 @@ func (rf *Raft) handleRequestVote(event *Event) {
 	request := event.Payload.(*RequestVoteArgs)
 	reply := &RequestVoteReply{}
 
+	if rf.state.Load() == Candidate {
+		rf.Debug("Handling Competing Votes-------------------------------------")
+	}
+
 	if request.Term < rf.currentTerm.Load() {
 		rf.Debug("Outdated candidate requested vote rejecting...")
 		reply.Term = rf.currentTerm.Load()
 		reply.VoteGranted = false
 		event.Response <- reply
 		return
+	}
+
+	if request.Term > rf.currentTerm.Load() {
+		rf.stepDownToFollower(request.Term)
 	}
 
 	if (rf.votedFor.Load() == -1 || rf.votedFor.Load() == request.CandidateId) && rf.areLogsUptoDate(request.LastLogIndex, request.LastLogTerm) {
@@ -667,6 +676,9 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 	}
 
 	if request.Term > rf.currentTerm.Load() {
+		if rf.state.Load() == Leader {
+			rf.heartbeatTicker.Stop()
+		}
 		rf.stepDownToFollower(request.Term)
 		rf.setLeader(request.LeaderId)
 	}
@@ -739,7 +751,7 @@ func (rf *Raft) serve() {
 			if event.Name == EVENT_HEARTBEAT {
 				rf.Verbose("Event: %v", event.Name)
 			} else {
-				rf.Out("Event: %v", event.Name)
+				rf.Debug("Event: %v", event.Name)
 			}
 			rf.eventsHandlers[rf.state.Load()][event.Name](event)
 		}
@@ -756,12 +768,14 @@ func (rf *Raft) electionTicker() {
 		case <-rf.electionTimer:
 			if rf.dead.Load() != 1 {
 				if rf.resetTimer.Load() == true {
-					rf.electionTimer = randomTimeout()
 					rf.resetTimer.Store(false)
+					rf.electionTimer = randomTimeout()
 				} else {
-					rf.Debug("Election Timer Lapsed Out")
 					event := rf.createEvent(EVENT_START_ELECTIONS, nil, nil)
-					rf.emit(event, false)
+					if rf.state.Load() != Leader {
+						rf.emit(event, false)
+					}
+					rf.electionTimer = randomTimeout()
 				}
 			}
 		}
