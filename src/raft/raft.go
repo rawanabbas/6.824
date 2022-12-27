@@ -150,7 +150,8 @@ type Raft struct {
 	eventsHandlers map[int32]map[string]func(event *Event)
 
 	//Utility Flags
-	resetTimer atomic.Bool
+	resetTimer    atomic.Bool
+	stopHeartbeat atomic.Bool
 }
 
 func (rf *Raft) emptyHandler(event *Event) {
@@ -204,6 +205,11 @@ func (rf *Raft) setLastApplied(lastApplied int32) {
 
 func (rf *Raft) setNextIndex(i int, nextIndex int32) {
 	rf.nextIndex[i].Store(nextIndex)
+}
+func (rf *Raft) decrNextIndex(i int) {
+	if rf.nextIndex[i].Load() > 1 {
+		rf.nextIndex[i].Add(-1)
+	}
 }
 
 func (rf *Raft) setMatchIndex(i int, matchIndex int32) {
@@ -336,11 +342,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	for {
 		select {
 		case resp := <-replyCh:
-			rf.Out("Response: %v", resp)
+			rf.Debug("Response: %v", resp)
 			r := resp.(*RequestVoteReply)
 			reply.Term = r.Term
 			reply.VoteGranted = r.VoteGranted
-			rf.Out("Reply: %v", reply)
+			rf.Debug("Reply: %v", reply)
 			return
 		}
 	}
@@ -357,6 +363,7 @@ func (rf *Raft) AppendEntries(request *AppendEntriesRequest, reply *AppendEntrie
 			reply.LeaderId = r.LeaderId
 			reply.Success = r.Success
 			reply.Term = r.Term
+			return
 		}
 	}
 }
@@ -414,7 +421,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, reply *AppendEntriesReply) {
-	rf.Verbose("sendAppendEntries to %v", server)
+	rf.Debug("sendAppendEntries to %v with entries %v", server, request.Entries)
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, &reply)
 	if !ok {
 		return
@@ -428,15 +435,17 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 
 	if reply.Success {
 		mx := max(int(request.PrevLogIndex)+len(request.Entries), int(rf.matchIndex[server].Load()))
-		rf.matchIndex[server].Store(int32(mx))
-		rf.nextIndex[server].Store(int32(mx + 1))
+		rf.setMatchIndex(server, int32(mx))
+		rf.setNextIndex(server, int32(mx+1))
 	} else {
-		rf.nextIndex[server].Add(-1)
+		rf.decrNextIndex(server)
 	}
-
+	rf.lock()
+	logs := rf.logs
+	rf.unlock()
 	for n := rf.getLastLogIndex(); n >= int(rf.commitIndex.Load()); n-- {
 		count := 1
-		if rf.logs[n].Term == rf.currentTerm.Load() {
+		if logs[n].Term == rf.currentTerm.Load() {
 			for peer := range rf.peers {
 				if peer != int(rf.me) && int(rf.matchIndex[peer].Load()) >= n {
 					count++
@@ -481,13 +490,23 @@ func (rf *Raft) emit(event *Event, async bool) {
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
+	if rf.state.Load() != Leader {
+		return -1, -1, false
+	}
+	term := rf.currentTerm.Load()
 	isLeader := true
 
-	// Your code here (2B).
+	entry := LogEntry{
+		Term:    term,
+		Command: command,
+	}
 
-	return index, term, isLeader
+	rf.lock()
+	rf.logs = append(rf.logs, entry)
+	rf.unlock()
+	index := rf.getLastLogIndex()
+
+	return int(index), int(term), isLeader
 }
 
 func (rf *Raft) createEvent(name string, payload interface{}, response chan interface{}) (event *Event) {
@@ -507,7 +526,7 @@ func (rf *Raft) getLastLogIndex() int {
 }
 
 func (rf *Raft) getLastLogTerm() int32 {
-	lastLogIndex := rf.getLastLogIndex()
+	lastLogIndex := max(rf.getLastLogIndex()-1, 0)
 	rf.lock()
 	defer rf.unlock()
 	return rf.logs[lastLogIndex].Term
@@ -527,7 +546,7 @@ func (rf *Raft) broadcastVoteRequest() {
 		LastLogIndex: rf.getLastLogIndex(),
 	}
 
-	rf.Out("Request ready: %v", request)
+	rf.Debug("Request ready: %v", request)
 	results := make(chan bool)
 	for peer := range rf.peers {
 		if peer == int(rf.me) {
@@ -573,39 +592,51 @@ func (rf *Raft) areLogsUptoDate(cLastIndex int, cLastTerm int32) bool {
 }
 
 func (rf *Raft) startHeartbeatTicker() {
-	rf.heartbeatTicker = time.NewTicker(50 * time.Millisecond)
 	for {
 		select {
 		case <-rf.heartbeatTicker.C:
-			event := rf.createEvent(EVENT_HEARTBEAT, nil, nil)
-			rf.emit(event, false)
+			if rf.stopHeartbeat.Load() {
+				rf.heartbeatTicker.Stop()
+			} else {
+				event := rf.createEvent(EVENT_HEARTBEAT, nil, nil)
+				rf.emit(event, false)
+			}
 		}
 	}
 }
 
-func (rf *Raft) sendAppendEntriesToAllPeers(entries []LogEntry) {
-	request := &AppendEntriesRequest{}
-	request.Entries = entries
-	request.LeaderCommit = rf.commitIndex.Load()
-	request.LeaderId = rf.me
-	request.PrevLogIndex = rf.getLastLogIndex()
-	request.PrevLogTerm = rf.getLastLogTerm()
-	request.Term = rf.currentTerm.Load()
+func (rf *Raft) sendAppendEntriesToAllPeers() {
+
 	for peer := range rf.peers {
 		if peer == int(rf.me) {
 			continue
 		}
+		request := &AppendEntriesRequest{}
+		rf.lock()
+		request.Entries = rf.logs[rf.nextIndex[peer].Load():]
+		logs := rf.logs
+		request.LeaderId = rf.me
+		request.LeaderCommit = rf.commitIndex.Load()
+		request.Term = rf.currentTerm.Load()
+		prevIndex := rf.nextIndex[peer].Load() - 1
+		request.PrevLogIndex = max(int(prevIndex), 0)
+		request.PrevLogTerm = logs[request.PrevLogIndex].Term
+		rf.unlock()
 		go rf.sendAppendEntries(peer, request, &AppendEntriesReply{})
 	}
 }
 
 func (rf *Raft) sendHeartbeats() {
-	rf.sendAppendEntriesToAllPeers([]LogEntry{})
+	rf.sendAppendEntriesToAllPeers()
 }
 
 func (rf *Raft) resetVoltaileState() {
 	rf.nextIndex = make([]atomic.Int32, len(rf.peers))
 	rf.matchIndex = make([]atomic.Int32, len(rf.peers))
+	for peer := range rf.peers {
+		rf.setMatchIndex(peer, 0)
+		rf.setNextIndex(peer, 1)
+	}
 }
 
 func (rf *Raft) handleStartElections(event *Event) {
@@ -618,7 +649,7 @@ func (rf *Raft) handleRequestVote(event *Event) {
 	reply := &RequestVoteReply{}
 
 	if rf.state.Load() == Candidate {
-		rf.Debug("Handling Competing Votes-------------------------------------")
+		rf.Debug("Handling Competing Votes----------------------")
 	}
 
 	if request.Term < rf.currentTerm.Load() {
@@ -649,6 +680,13 @@ func (rf *Raft) handleRequestVote(event *Event) {
 	return
 }
 
+func (rf *Raft) startHearbeat() {
+	rf.lock()
+	rf.stopHeartbeat.Store(false)
+	rf.heartbeatTicker.Reset(50 * time.Millisecond)
+	rf.unlock()
+}
+
 func (rf *Raft) handleEndElections(event *Event) {
 	win := event.Payload.(bool)
 	if win {
@@ -656,7 +694,7 @@ func (rf *Raft) handleEndElections(event *Event) {
 		rf.setState(Leader)
 		rf.resetVoltaileState()
 		rf.sendHeartbeats()
-		go rf.startHeartbeatTicker()
+		rf.startHearbeat()
 	} else {
 		rf.Out("Stepping down to follower...")
 		rf.setVotedFor(-1)
@@ -668,6 +706,7 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 	request := event.Payload.(*AppendEntriesRequest)
 	rf.resetElectionTimer()
 	reply := &AppendEntriesReply{}
+	// rf.Debug("handle append entries %v", event.Payload)
 	if request.Term < rf.currentTerm.Load() {
 		reply.Term = rf.currentTerm.Load()
 		reply.Success = false
@@ -677,7 +716,7 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 
 	if request.Term > rf.currentTerm.Load() {
 		if rf.state.Load() == Leader {
-			rf.heartbeatTicker.Stop()
+			rf.stopHeartbeat.Store(true)
 		}
 		rf.stepDownToFollower(request.Term)
 		rf.setLeader(request.LeaderId)
@@ -700,8 +739,7 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 	}
 	rf.lock()
 	rf.logs = rf.logs[:i]
-	request.Entries = request.Entries[j:]
-	rf.logs = append(rf.logs, request.Entries...)
+	rf.logs = append(rf.logs, request.Entries[j:]...)
 	rf.unlock()
 	reply.Success = true
 	if request.LeaderCommit > rf.commitIndex.Load() {
@@ -718,6 +756,7 @@ func (rf *Raft) handleHeartbeats(event *Event) {
 }
 
 func (rf *Raft) handleShutdown(event *Event) {
+	rf.Debug("Final Logs before shutdown: %v", rf.logs)
 	rf.dead.Store(1)
 }
 
@@ -793,7 +832,7 @@ func (rf *Raft) electionTicker() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	// SetDebug(true)
+	SetDebug(true)
 	// SetVerbose(true)
 	rf := &Raft{}
 	rf.peers = peers
@@ -809,13 +848,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.resetTimer.Store(false)
 	rf.eventCh = make(chan *Event)
 	rf.applyCh = applyCh
-	rf.nextIndex = make([]atomic.Int32, len(peers))
-	rf.matchIndex = make([]atomic.Int32, len(peers))
+	rf.resetVoltaileState()
 	rf.eventsHandlers = make(map[int32]map[string]func(event *Event))
 	rf.eventsHandlers[Follower] = make(map[string]func(event *Event))
 	rf.eventsHandlers[Candidate] = make(map[string]func(event *Event))
 	rf.eventsHandlers[Leader] = make(map[string]func(event *Event))
+	rf.heartbeatTicker = time.NewTicker(50 * time.Millisecond)
+	rf.heartbeatTicker.Stop()
+	rf.stopHeartbeat.Store(true)
+	go rf.startHeartbeatTicker()
+
 	rf.logs = append(rf.logs, LogEntry{Term: 0})
+
 	rf.electionTimer = randomTimeout()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

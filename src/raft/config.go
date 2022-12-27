@@ -166,6 +166,7 @@ func (cfg *config) checkLogs(i int, m ApplyMsg) (string, bool) {
 // applier reads message from apply ch and checks that they match the log
 // contents
 func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
+
 	for m := range applyCh {
 		if m.CommandValid == false {
 			// ignore other types of ApplyMsg
