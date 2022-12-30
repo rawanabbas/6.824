@@ -385,9 +385,12 @@ loop:
 			// give solution some time to settle
 			time.Sleep(3 * time.Second)
 		}
-
+		t.Log("===================Checking one leader")
 		leader := cfg.checkOneLeader()
+		t.Log("===================Found one leader", leader)
+		t.Log("===================Committing entry {1}")
 		_, term, ok := cfg.rafts[leader].Start(1)
+		t.Log("===================Committed entry {1}", term, ok)
 		if !ok {
 			// leader moved on really quickly
 			continue
@@ -400,10 +403,14 @@ loop:
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
+				t.Logf("===================Committing entry {%v}", 100+i)
 				i, term1, ok := cfg.rafts[leader].Start(100 + i)
+				t.Logf("===================Committed entry {%v} %v %v", 100+i, term1, ok)
+				t.Log("===================Checking equal terms")
 				if term1 != term {
 					return
 				}
+				t.Log("===================Checked equal terms")
 				if ok != true {
 					return
 				}
@@ -479,33 +486,54 @@ func TestRejoin2B(t *testing.T) {
 
 	cfg.begin("Test (2B): rejoin of partitioned leader")
 
+	t.Log("=====================Committing Entry 101 to all servers")
 	cfg.one(101, servers, true)
+	t.Log("=====================Committed Entry 101 to all servers")
 
 	// leader network failure
+	t.Log("=====================Checking One Leader")
 	leader1 := cfg.checkOneLeader()
+	t.Log("=====================Checked One Leader -->", leader1)
+	t.Log("=====================Disconnecting Leader", leader1)
 	cfg.disconnect(leader1)
+	t.Log("=====================Disconnected Leader", leader1)
 
 	// make old leader try to agree on some entries
+	t.Log("=====================Adding Entries", 102, 103, 104, " to isolated", leader1)
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
 	cfg.rafts[leader1].Start(104)
+	t.Log("=====================Added Entries", 102, 103, 104, " to isolated", leader1)
 
 	// new leader commits, also for index=2
+	t.Log("=====================Committing 103 to the remaining two nodes")
 	cfg.one(103, 2, true)
+	t.Log("=====================Committed 103 to the remaining two nodes")
 
 	// new leader network failure
+	t.Log("=====================Checking New (Second) Leader")
 	leader2 := cfg.checkOneLeader()
+	t.Log("=====================Checked New (Second) Leader", leader2)
+	t.Log("=====================Disconnecting new Leader", leader2)
 	cfg.disconnect(leader2)
+	t.Log("=====================Disconnected new Leader", leader2)
 
 	// old leader connected again
+	t.Log("=====================Connecting Old Leader", leader1)
 	cfg.connect(leader1)
+	t.Log("=====================Connected Old Leader", leader1)
 
+	t.Log("=====================Committing 104 to", leader1, "and the remaining node")
 	cfg.one(104, 2, true)
+	t.Log("=====================Committed 104 to", leader1, "and the remaining node")
 
+	t.Log("=====================Reconnecting Second Leader", leader2)
 	// all together now
 	cfg.connect(leader2)
-
+	t.Log("=====================Reconnected Second Leader", leader2)
+	t.Log("=====================New Leader commiting an entry", 105)
 	cfg.one(105, servers, true)
+	t.Log("=====================New Leader committed an entry", 105)
 
 	cfg.end()
 }

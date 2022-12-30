@@ -20,12 +20,12 @@ package raft
 import (
 	//	"bytes"
 
-	"runtime"
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.824/labgob"
+	"6.824-2022/labgob"
 	"6.824-2022/labrpc"
 )
 
@@ -119,7 +119,6 @@ type Raft struct {
 	me        int32               // this peer's index into peers[]
 	dead      atomic.Int32
 
-	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	state  atomic.Int32
@@ -247,11 +246,11 @@ func (rf *Raft) unlock() {
 	rf.mu.Unlock()
 }
 func (rf *Raft) lockTimer() {
-	if isVerbose {
-		buf := make([]byte, 10000)
-		runtime.Stack(buf, false)
-		rf.Verbose("Locking, stack: %v", string(buf))
-	}
+	// if isVerbose {
+	// 	buf := make([]byte, 10000)
+	// 	runtime.Stack(buf, false)
+	// 	rf.Verbose("Locking, stack: %v", string(buf))
+	// }
 	rf.timerMu.Lock()
 }
 
@@ -274,14 +273,17 @@ func (rf *Raft) GetState() (int32, bool) {
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+
+	rf.lock()
+	buff := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buff)
+	if enc.Encode(rf.currentTerm.Load()) != nil || enc.Encode(rf.votedFor.Load()) != nil || enc.Encode(rf.logs) != nil {
+		rf.Error("Failed to encode raft state")
+	} else {
+		data := buff.Bytes()
+		rf.persister.SaveRaftState(data)
+	}
+	rf.unlock()
 }
 
 // restore previously persisted state.
@@ -289,19 +291,18 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	buff := bytes.NewBuffer(data)
+	dec := labgob.NewDecoder(buff)
+	var currentTerm int32
+	var votedFor int32
+	var logs []LogEntry
+	if dec.Decode(&currentTerm) != nil || dec.Decode(&votedFor) != nil || dec.Decode(&logs) != nil {
+		rf.Error("Failed to read/recover persistent state")
+	} else {
+		rf.setCurrentTerm(currentTerm)
+		rf.setVotedFor(votedFor)
+		rf.logs = logs
+	}
 }
 
 func (rf *Raft) applyLogs() {
@@ -412,6 +413,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 		// Step Down to Follower
 		rf.Out("We are out-dated waiting for a leader to sync")
 		rf.stepDownToFollower(reply.Term)
+		rf.persist()
 		results <- false
 		return
 	}
@@ -426,6 +428,8 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 	if !ok {
 		return
 	}
+
+	defer rf.persist()
 
 	if reply.Term > rf.currentTerm.Load() {
 		rf.stepDownToFollower(reply.Term)
@@ -464,6 +468,7 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 func (rf *Raft) stepDownToFollower(term int32) {
 	rf.setVotedFor(-1)
 	rf.setState(Follower)
+	rf.stopHeartbeat.Store(true)
 	rf.setCurrentTerm(term)
 }
 
@@ -491,8 +496,10 @@ func (rf *Raft) emit(event *Event, async bool) {
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if rf.state.Load() != Leader {
-		return -1, -1, false
+		return -1, int(rf.currentTerm.Load()), false
 	}
+	rf.lock()
+	index := len(rf.logs) - 1
 	term := rf.currentTerm.Load()
 	isLeader := true
 
@@ -501,12 +508,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 
-	rf.lock()
 	rf.logs = append(rf.logs, entry)
+	rf.nextIndex[rf.me].Add(1)
+	rf.matchIndex[rf.me].Store(int32(index))
+	index = len(rf.logs) - 1
 	rf.unlock()
-	index := rf.getLastLogIndex()
-
-	return int(index), int(term), isLeader
+	rf.persist()
+	return index, int(term), isLeader
 }
 
 func (rf *Raft) createEvent(name string, payload interface{}, response chan interface{}) (event *Event) {
@@ -526,7 +534,7 @@ func (rf *Raft) getLastLogIndex() int {
 }
 
 func (rf *Raft) getLastLogTerm() int32 {
-	lastLogIndex := max(rf.getLastLogIndex()-1, 0)
+	lastLogIndex := max(rf.getLastLogIndex(), 0)
 	rf.lock()
 	defer rf.unlock()
 	return rf.logs[lastLogIndex].Term
@@ -536,6 +544,7 @@ func (rf *Raft) voteForSelf() {
 	rf.setState(Candidate)
 	rf.setVotedFor(rf.me)
 	rf.incCurrentTerm()
+	rf.persist()
 }
 
 func (rf *Raft) broadcastVoteRequest() {
@@ -647,9 +656,14 @@ func (rf *Raft) handleStartElections(event *Event) {
 func (rf *Raft) handleRequestVote(event *Event) {
 	request := event.Payload.(*RequestVoteArgs)
 	reply := &RequestVoteReply{}
-
+	defer rf.persist()
+	rf.Debug("handleRequestVote from %v, index: %v, term: %v", request.CandidateId, request.LastLogIndex, request.LastLogTerm)
 	if rf.state.Load() == Candidate {
-		rf.Debug("Handling Competing Votes----------------------")
+		rf.Debug("Handling Competing Votes")
+	}
+
+	if rf.state.Load() == Leader {
+		rf.Debug("I am a leader but found a competing vote")
 	}
 
 	if request.Term < rf.currentTerm.Load() {
@@ -661,6 +675,7 @@ func (rf *Raft) handleRequestVote(event *Event) {
 	}
 
 	if request.Term > rf.currentTerm.Load() {
+		rf.Debug("Stepping down to a follower")
 		rf.stepDownToFollower(request.Term)
 	}
 
@@ -698,13 +713,14 @@ func (rf *Raft) handleEndElections(event *Event) {
 	} else {
 		rf.Out("Stepping down to follower...")
 		rf.setVotedFor(-1)
-		rf.setState(Follower)
+		rf.stepDownToFollower(rf.currentTerm.Load())
 	}
 }
 
 func (rf *Raft) handleAppendEntries(event *Event) {
 	request := event.Payload.(*AppendEntriesRequest)
 	rf.resetElectionTimer()
+	defer rf.persist()
 	reply := &AppendEntriesReply{}
 	// rf.Debug("handle append entries %v", event.Payload)
 	if request.Term < rf.currentTerm.Load() {
@@ -832,14 +848,14 @@ func (rf *Raft) electionTicker() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	SetDebug(true)
+	// SetDebug(true)
 	// SetVerbose(true)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = int32(me)
 
-	// Your initialization code here (2A, 2B, 2C).
+	// Initialize State
 	rf.setState(Follower)
 	rf.setCurrentTerm(0)
 	rf.setVotedFor(-1)
@@ -867,9 +883,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Register Event Handlers
 	rf.on(EVENT_HEARTBEAT, rf.handleHeartbeats, Leader)
 	rf.on(EVENT_END_ELECTIONS, rf.handleEndElections, Candidate)
-	rf.on(EVENT_REQUEST_VOTE, rf.handleRequestVote, Follower|Candidate)
 	rf.on(EVENT_START_ELECTIONS, rf.handleStartElections, Follower|Candidate)
 	rf.on(EVENT_APPEND_ENTRIES, rf.handleAppendEntries, Follower|Candidate|Leader)
+	rf.on(EVENT_REQUEST_VOTE, rf.handleRequestVote, Follower|Candidate|Leader)
 	rf.on(EVENT_SHUTDOWN, rf.handleShutdown, Follower|Leader|Candidate)
 	// start ticker goroutine to start elections
 	go rf.electionTicker()
