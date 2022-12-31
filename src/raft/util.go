@@ -31,6 +31,6 @@ func max(a, b int) int {
 }
 
 func randomTimeout() <-chan time.Time {
-	period := 250*time.Millisecond + time.Duration(rand.Intn(150))*time.Millisecond
+	period := 300*time.Millisecond + time.Duration(rand.Intn(150))*time.Millisecond
 	return time.After(period)
 }

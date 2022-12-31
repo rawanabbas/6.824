@@ -306,6 +306,8 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 func (rf *Raft) applyLogs() {
+	rf.lock()
+	defer rf.unlock()
 	for i := rf.lastApplied.Load() + 1; i <= rf.commitIndex.Load(); i++ {
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true,
@@ -347,6 +349,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			r := resp.(*RequestVoteReply)
 			reply.Term = r.Term
 			reply.VoteGranted = r.VoteGranted
+			rf.persist()
 			rf.Debug("Reply: %v", reply)
 			return
 		}
@@ -447,7 +450,7 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 	rf.lock()
 	logs := rf.logs
 	rf.unlock()
-	for n := rf.getLastLogIndex(); n >= int(rf.commitIndex.Load()); n-- {
+	for n := rf.getLastLogIndex(); n >= int(rf.commitIndex.Load()) && n < len(logs); n-- {
 		count := 1
 		if logs[n].Term == rf.currentTerm.Load() {
 			for peer := range rf.peers {
@@ -466,10 +469,12 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 }
 
 func (rf *Raft) stepDownToFollower(term int32) {
+	rf.Out("Going with the flow!")
 	rf.setVotedFor(-1)
 	rf.setState(Follower)
 	rf.stopHeartbeat.Store(true)
 	rf.setCurrentTerm(term)
+	rf.persist()
 }
 
 func (rf *Raft) emit(event *Event, async bool) {
@@ -541,6 +546,7 @@ func (rf *Raft) getLastLogTerm() int32 {
 }
 
 func (rf *Raft) voteForSelf() {
+	rf.Out("No Leader Maybe I will be")
 	rf.setState(Candidate)
 	rf.setVotedFor(rf.me)
 	rf.incCurrentTerm()
@@ -711,7 +717,6 @@ func (rf *Raft) handleEndElections(event *Event) {
 		rf.sendHeartbeats()
 		rf.startHearbeat()
 	} else {
-		rf.Out("Stepping down to follower...")
 		rf.setVotedFor(-1)
 		rf.stepDownToFollower(rf.currentTerm.Load())
 	}
@@ -722,7 +727,6 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 	rf.resetElectionTimer()
 	defer rf.persist()
 	reply := &AppendEntriesReply{}
-	// rf.Debug("handle append entries %v", event.Payload)
 	if request.Term < rf.currentTerm.Load() {
 		reply.Term = rf.currentTerm.Load()
 		reply.Success = false
@@ -761,9 +765,9 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 	if request.LeaderCommit > rf.commitIndex.Load() {
 		mn := min(int(request.LeaderCommit), rf.getLastLogIndex())
 		rf.setCommitIndex(int32(mn))
-		//Commit new log changes
 		rf.applyLogs()
 	}
+	rf.persist()
 	event.Response <- reply
 }
 
@@ -772,7 +776,6 @@ func (rf *Raft) handleHeartbeats(event *Event) {
 }
 
 func (rf *Raft) handleShutdown(event *Event) {
-	rf.Debug("Final Logs before shutdown: %v", rf.logs)
 	rf.dead.Store(1)
 }
 
