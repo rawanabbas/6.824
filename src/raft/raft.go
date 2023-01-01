@@ -21,6 +21,7 @@ import (
 	//	"bytes"
 
 	"bytes"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -51,6 +52,7 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
+	Index   int32
 	Term    int32
 	Command interface{}
 }
@@ -93,22 +95,6 @@ const (
 	Candidate       = 2
 	Follower        = 4
 )
-
-const EVENT_REQUEST_VOTE = "RequestVote"
-const EVENT_APPEND_ENTRIES = "AppendEntries"
-const EVENT_START_ELECTIONS = "StartElections"
-const EVENT_END_ELECTIONS = "EndElections"
-const EVENT_RESET_ELECTIONS = "ResetElections"
-const EVENT_HEARTBEAT = "Heartbeat"
-const EVENT_SHUTDOWN = "Shutdown"
-
-type Event struct {
-	Name         string
-	Payload      interface{}
-	Response     chan interface{}
-	CreatedAt    time.Time
-	CreatedState int32
-}
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -153,30 +139,6 @@ type Raft struct {
 	stopHeartbeat atomic.Bool
 }
 
-func (rf *Raft) emptyHandler(event *Event) {
-	rf.Warn("Got an event %v while on state %v", event.Name, rf.getStateString())
-	return
-}
-
-// Event Handle Registration
-func (rf *Raft) on(name string, handler func(event *Event), filter int32) {
-	index := 0
-	for ; filter != 0 && index < 3; filter = filter >> 1 {
-		currentState := int32(1 << index)
-		if filter&1 == 1 {
-			rf.eventsHandlers[currentState][name] = handler
-		}
-
-		index = index + 1
-	}
-
-	for _, state := range [3]int32{Leader, Follower, Candidate} {
-		if _, ok := rf.eventsHandlers[state][name]; !ok {
-			rf.eventsHandlers[state][name] = rf.emptyHandler
-		}
-	}
-}
-
 // Setters
 func (rf *Raft) setState(state int32) {
 	rf.state.Store(state)
@@ -219,6 +181,20 @@ func (rf *Raft) incCurrentTerm() {
 	rf.currentTerm.Add(1)
 }
 
+func (rf *Raft) getLogEntry(index int) (entry LogEntry) {
+	rf.lock()
+	defer rf.unlock()
+	firstIdx := rf.logs[0].Index
+	entry = rf.logs[index-int(firstIdx)]
+	return
+}
+
+func (rf *Raft) addLogEntry(entries ...LogEntry) {
+	rf.lock()
+	defer rf.unlock()
+	rf.logs = append(rf.logs, entries...)
+}
+
 func (rf *Raft) getStateString() string {
 	var state string
 	switch rf.state.Load() {
@@ -242,7 +218,7 @@ func (rf *Raft) lock() {
 }
 
 func (rf *Raft) unlock() {
-	// rf.Verbose("Unlocking")
+	rf.Verbose("Unlocking")
 	rf.mu.Unlock()
 }
 func (rf *Raft) lockTimer() {
@@ -269,21 +245,29 @@ func (rf *Raft) GetState() (int32, bool) {
 	return term, isLeader
 }
 
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-func (rf *Raft) persist() {
-
+func (rf *Raft) generatePersistantState() ([]byte, error) {
 	rf.lock()
+	defer rf.unlock()
 	buff := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buff)
 	if enc.Encode(rf.currentTerm.Load()) != nil || enc.Encode(rf.votedFor.Load()) != nil || enc.Encode(rf.logs) != nil {
 		rf.Error("Failed to encode raft state")
+		return nil, fmt.Errorf("Failed to encode raft state")
+	}
+	data := buff.Bytes()
+	return data, nil
+}
+
+// save Raft's persistent state to stable storage,
+// where it can later be retrieved after a crash and restart.
+// see paper's Figure 2 for a description of what should be persistent.
+func (rf *Raft) persist() {
+	data, err := rf.generatePersistantState()
+	if err != nil {
+		rf.Error(err.Error())
 	} else {
-		data := buff.Bytes()
 		rf.persister.SaveRaftState(data)
 	}
-	rf.unlock()
 }
 
 // restore previously persisted state.
@@ -306,15 +290,13 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 func (rf *Raft) applyLogs() {
-	rf.lock()
-	defer rf.unlock()
 	for i := rf.lastApplied.Load() + 1; i <= rf.commitIndex.Load(); i++ {
 		rf.applyCh <- ApplyMsg{
 			CommandValid: true,
-			Command:      rf.logs[i].Command,
-			CommandIndex: int(i),
+			Command:      rf.getLogEntry(int(i)).Command,
+			CommandIndex: int(rf.getLogEntry(int(i)).Index),
 		}
-		rf.lastApplied.Store(i)
+		rf.lastApplied.Store(rf.getLogEntry(int(i)).Index)
 	}
 }
 
@@ -332,8 +314,29 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	rf.Out("Snapshotting.....")
 	// Your code here (2D).
-
+	rf.lock()
+	defer rf.unlock()
+	// Get Slice Index Offset
+	sliceIndex := index - int(rf.logs[0].Index)
+	rf.logs = rf.logs[sliceIndex+1:]
+	state, err := rf.generatePersistantState()
+	if err != nil {
+		rf.Error(err.Error())
+	}
+	rf.persister.SaveStateAndSnapshot(state, snapshot)
+	peers := rf.peers
+	me := rf.me
+	go func(peers []*labrpc.ClientEnd) {
+		for peer := range peers {
+			if peer != int(me) {
+				if rf.nextIndex[peer].Load() <= int32(index) {
+					// send Install snapshot rpc
+				}
+			}
+		}
+	}(peers)
 }
 
 // example RequestVote RPC handler.
@@ -452,7 +455,8 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 	rf.unlock()
 	for n := rf.getLastLogIndex(); n >= int(rf.commitIndex.Load()) && n < len(logs); n-- {
 		count := 1
-		if logs[n].Term == rf.currentTerm.Load() {
+		// if logs[n].Term == rf.currentTerm.Load() {
+		if rf.getLogEntry(n).Term == rf.currentTerm.Load() {
 			for peer := range rf.peers {
 				if peer != int(rf.me) && int(rf.matchIndex[peer].Load()) >= n {
 					count++
@@ -477,16 +481,6 @@ func (rf *Raft) stepDownToFollower(term int32) {
 	rf.persist()
 }
 
-func (rf *Raft) emit(event *Event, async bool) {
-	if async {
-		go func() {
-			rf.eventCh <- event
-		}()
-	} else {
-		rf.eventCh <- event
-	}
-}
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -509,6 +503,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	entry := LogEntry{
+		Index:   rf.logs[index].Index + 1,
 		Term:    term,
 		Command: command,
 	}
@@ -516,7 +511,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, entry)
 	rf.nextIndex[rf.me].Add(1)
 	rf.matchIndex[rf.me].Store(int32(index))
-	index = len(rf.logs) - 1
+	index = int(rf.logs[index].Index) + 1
 	rf.unlock()
 	rf.persist()
 	return index, int(term), isLeader
@@ -535,13 +530,13 @@ func (rf *Raft) createEvent(name string, payload interface{}, response chan inte
 func (rf *Raft) getLastLogIndex() int {
 	rf.lock()
 	defer rf.unlock()
-	return len(rf.logs) - 1
+	return int(rf.logs[len(rf.logs)-1].Index)
 }
 
 func (rf *Raft) getLastLogTerm() int32 {
-	lastLogIndex := max(rf.getLastLogIndex(), 0)
 	rf.lock()
 	defer rf.unlock()
+	lastLogIndex := len(rf.logs) - 1
 	return rf.logs[lastLogIndex].Term
 }
 
@@ -628,7 +623,8 @@ func (rf *Raft) sendAppendEntriesToAllPeers() {
 		}
 		request := &AppendEntriesRequest{}
 		rf.lock()
-		request.Entries = rf.logs[rf.nextIndex[peer].Load():]
+		nextIndex := rf.nextIndex[peer].Load() - rf.logs[0].Index
+		request.Entries = rf.logs[nextIndex:]
 		logs := rf.logs
 		request.LeaderId = rf.me
 		request.LeaderCommit = rf.commitIndex.Load()
@@ -654,129 +650,11 @@ func (rf *Raft) resetVoltaileState() {
 	}
 }
 
-func (rf *Raft) handleStartElections(event *Event) {
-	rf.voteForSelf()
-	rf.broadcastVoteRequest()
-}
-
-func (rf *Raft) handleRequestVote(event *Event) {
-	request := event.Payload.(*RequestVoteArgs)
-	reply := &RequestVoteReply{}
-	defer rf.persist()
-	rf.Debug("handleRequestVote from %v, index: %v, term: %v", request.CandidateId, request.LastLogIndex, request.LastLogTerm)
-	if rf.state.Load() == Candidate {
-		rf.Debug("Handling Competing Votes")
-	}
-
-	if rf.state.Load() == Leader {
-		rf.Debug("I am a leader but found a competing vote")
-	}
-
-	if request.Term < rf.currentTerm.Load() {
-		rf.Debug("Outdated candidate requested vote rejecting...")
-		reply.Term = rf.currentTerm.Load()
-		reply.VoteGranted = false
-		event.Response <- reply
-		return
-	}
-
-	if request.Term > rf.currentTerm.Load() {
-		rf.Debug("Stepping down to a follower")
-		rf.stepDownToFollower(request.Term)
-	}
-
-	if (rf.votedFor.Load() == -1 || rf.votedFor.Load() == request.CandidateId) && rf.areLogsUptoDate(request.LastLogIndex, request.LastLogTerm) {
-		rf.Debug("Logs are up to date and not voted for anyone else yet granting vote....")
-		reply.Term = request.Term
-		reply.VoteGranted = true
-		rf.setVotedFor(request.CandidateId)
-		event.Response <- reply
-		return
-	}
-
-	rf.Debug("Logs are not up to date rejecting vote...")
-	reply.Term = rf.currentTerm.Load()
-	reply.VoteGranted = false
-	event.Response <- reply
-	return
-}
-
 func (rf *Raft) startHearbeat() {
-	rf.lock()
+	// rf.lock()
 	rf.stopHeartbeat.Store(false)
 	rf.heartbeatTicker.Reset(50 * time.Millisecond)
-	rf.unlock()
-}
-
-func (rf *Raft) handleEndElections(event *Event) {
-	win := event.Payload.(bool)
-	if win {
-		rf.Out("Stepping up as leader...")
-		rf.setState(Leader)
-		rf.resetVoltaileState()
-		rf.sendHeartbeats()
-		rf.startHearbeat()
-	} else {
-		rf.setVotedFor(-1)
-		rf.stepDownToFollower(rf.currentTerm.Load())
-	}
-}
-
-func (rf *Raft) handleAppendEntries(event *Event) {
-	request := event.Payload.(*AppendEntriesRequest)
-	rf.resetElectionTimer()
-	defer rf.persist()
-	reply := &AppendEntriesReply{}
-	if request.Term < rf.currentTerm.Load() {
-		reply.Term = rf.currentTerm.Load()
-		reply.Success = false
-		event.Response <- reply
-		return
-	}
-
-	if request.Term > rf.currentTerm.Load() {
-		if rf.state.Load() == Leader {
-			rf.stopHeartbeat.Store(true)
-		}
-		rf.stepDownToFollower(request.Term)
-		rf.setLeader(request.LeaderId)
-	}
-
-	lastLogIndex := rf.getLastLogIndex()
-	reply.Success = false
-	reply.Term = rf.currentTerm.Load()
-	if request.PrevLogIndex > lastLogIndex || rf.logs[request.PrevLogIndex].Term != request.PrevLogTerm {
-		event.Response <- reply
-		return
-	}
-
-	j := 0
-	i := request.PrevLogIndex + 1
-	for ; i < lastLogIndex+1 && j < len(request.Entries); i, j = i+1, j+1 {
-		if rf.logs[i].Term != request.Entries[j].Term {
-			break
-		}
-	}
-	rf.lock()
-	rf.logs = rf.logs[:i]
-	rf.logs = append(rf.logs, request.Entries[j:]...)
-	rf.unlock()
-	reply.Success = true
-	if request.LeaderCommit > rf.commitIndex.Load() {
-		mn := min(int(request.LeaderCommit), rf.getLastLogIndex())
-		rf.setCommitIndex(int32(mn))
-		rf.applyLogs()
-	}
-	rf.persist()
-	event.Response <- reply
-}
-
-func (rf *Raft) handleHeartbeats(event *Event) {
-	rf.sendHeartbeats()
-}
-
-func (rf *Raft) handleShutdown(event *Event) {
-	rf.dead.Store(1)
+	// rf.unlock()
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -789,8 +667,6 @@ func (rf *Raft) handleShutdown(event *Event) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
-	// atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
 	event := rf.createEvent(EVENT_SHUTDOWN, nil, nil)
 	rf.emit(event, false)
 }
@@ -877,8 +753,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.stopHeartbeat.Store(true)
 	go rf.startHeartbeatTicker()
 
-	rf.logs = append(rf.logs, LogEntry{Term: 0})
-
+	rf.addLogEntry(LogEntry{Term: 0, Index: 0})
 	rf.electionTimer = randomTimeout()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
