@@ -69,7 +69,7 @@ func (rf *Raft) handleEndElections(event *Event) {
 func (rf *Raft) handleAppendEntries(event *Event) {
 	request := event.Payload.(*AppendEntriesRequest)
 	rf.resetElectionTimer()
-	defer rf.persist()
+	// defer rf.persist()
 	reply := &AppendEntriesReply{}
 	if request.Term < rf.currentTerm.Load() {
 		reply.Term = rf.currentTerm.Load()
@@ -89,9 +89,11 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 	lastLogIndex := rf.getLastLogIndex()
 	reply.Success = false
 	reply.Term = rf.currentTerm.Load()
-	if request.PrevLogIndex > lastLogIndex || rf.getLogEntry(request.PrevLogIndex).Term != request.PrevLogTerm {
-		event.Response <- reply
-		return
+	if request.PrevLogIndex > lastLogIndex {
+		if (request.PrevLogIndex > (int(rf.lastSnapshottedIndex.Load())-1) && rf.getLogEntry(request.PrevLogIndex).Term != request.PrevLogTerm) || (rf.lastSnapshottedTerm.Load() != request.PrevLogTerm) {
+			event.Response <- reply
+			return
+		}
 	}
 
 	j := 0
@@ -103,6 +105,7 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 		}
 	}
 	rf.lock()
+	i = i - int(rf.lastSnapshottedIndex.Load())
 	rf.logs = rf.logs[:i]
 	rf.unlock()
 	rf.addLogEntry(request.Entries[j:]...)

@@ -224,7 +224,6 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 	if rf == nil {
 		return // ???
 	}
-
 	for m := range applyCh {
 		err_msg := ""
 		if m.SnapshotValid {
