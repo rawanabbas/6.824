@@ -240,7 +240,7 @@ func (rf *Raft) generatePersistantState() ([]byte, error) {
 	defer rf.unlock()
 	buff := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buff)
-	if enc.Encode(rf.currentTerm.Load()) != nil || enc.Encode(rf.votedFor.Load()) != nil || enc.Encode(rf.logs) != nil {
+	if enc.Encode(rf.currentTerm.Load()) != nil || enc.Encode(rf.votedFor.Load()) != nil || enc.Encode(rf.logs) != nil || enc.Encode(rf.lastSnapshottedIndex.Load()) != nil || enc.Encode(rf.lastSnapshottedTerm.Load()) != nil {
 		rf.Error("Failed to encode raft state")
 		return nil, fmt.Errorf("Failed to encode raft state")
 	}
@@ -268,14 +268,27 @@ func (rf *Raft) readPersist(data []byte) {
 	buff := bytes.NewBuffer(data)
 	dec := labgob.NewDecoder(buff)
 	var currentTerm int32
+	var lastSnapshottedIndex int32
+	var lastSnapshottedTerm int32
 	var votedFor int32
 	var logs []LogEntry
-	if dec.Decode(&currentTerm) != nil || dec.Decode(&votedFor) != nil || dec.Decode(&logs) != nil {
+	if dec.Decode(&currentTerm) != nil || dec.Decode(&votedFor) != nil || dec.Decode(&logs) != nil || dec.Decode(&lastSnapshottedIndex) != nil || dec.Decode(&lastSnapshottedTerm) != nil {
 		rf.Error("Failed to read/recover persistent state")
 	} else {
 		rf.setCurrentTerm(currentTerm)
 		rf.setVotedFor(votedFor)
+		rf.lastSnapshottedIndex.Store(lastSnapshottedIndex)
+		rf.lastSnapshottedTerm.Store(lastSnapshottedTerm)
 		rf.logs = logs
+	}
+}
+
+func (rf *Raft) applySnap(snapshot []byte) {
+	rf.applyCh <- ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      snapshot,
+		SnapshotTerm:  int(rf.lastSnapshottedTerm.Load()),
+		SnapshotIndex: int(rf.lastSnapshottedIndex.Load()) - 1,
 	}
 }
 
@@ -286,8 +299,13 @@ func (rf *Raft) applyLogs() {
 	firstIdx := rf.lastSnapshottedIndex.Load()
 
 	messages := []ApplyMsg{}
-
-	for i := rf.lastApplied.Load() + 1; i <= rf.commitIndex.Load(); i++ {
+	var i int32
+	if rf.lastApplied.Load() < firstIdx {
+		i = firstIdx
+	} else {
+		i = rf.lastApplied.Load() + 1
+	}
+	for ; i <= rf.commitIndex.Load(); i++ {
 		entry := rf.logs[i-firstIdx]
 		messages = append(messages, ApplyMsg{
 			CommandValid: true,
@@ -323,14 +341,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lastSnapshottedIndex.Store(int32(index) + 1)
 	rf.lastSnapshottedTerm.Store(rf.logs[arrIdx].Term)
 	rf.logs = rf.logs[arrIdx+1:]
-	// state, err := rf.generatePersistantState()
-	// if err != nil {
-	// 	rf.Error("An error has occured while generating the state")
-	// 	return
-	// }
 	buff := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buff)
-	if enc.Encode(rf.currentTerm.Load()) != nil || enc.Encode(rf.votedFor.Load()) != nil || enc.Encode(rf.logs) != nil {
+	if enc.Encode(rf.currentTerm.Load()) != nil || enc.Encode(rf.votedFor.Load()) != nil || enc.Encode(rf.logs) != nil || enc.Encode(rf.lastSnapshottedIndex.Load()) != nil || enc.Encode(rf.lastSnapshottedTerm.Load()) != nil {
 		rf.Error("Failed to encode raft state")
 		return
 	}
@@ -391,6 +404,24 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return
 }
 
+func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest, reply *InstallSnapshotReply) {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", request, &reply)
+	if !ok {
+		rf.Error("Couldn't Send InstallSnapshot Request")
+		return
+	}
+	// TODO: What to do with the reply?
+	// Should I change nextIndex[server] to be lastSnapshottedIndex
+	if reply.Term > rf.currentTerm.Load() {
+		// TODO:
+		rf.stepDownToFollower(reply.Term)
+		return
+	}
+	rf.lock()
+	rf.nextIndex[server].Store(rf.lastSnapshottedIndex.Load())
+	rf.unlock()
+}
+
 func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, reply *AppendEntriesReply) {
 	rf.Debug("sendAppendEntries to %v with entries %v", server, request.Entries)
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, &reply)
@@ -421,10 +452,12 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 	}
 	rf.unlock()
 	lastSnapIndex := rf.lastSnapshottedIndex.Load()
-	// for n := rf.getLastLogIndex(); n >= int(rf.commitIndex.Load()) && n < len(logs)+int(rf.lastSnapshottedIndex.Load()); n-- {
-	for n := int32(rf.commitIndex.Load() + 1); n < int32(len(logs)+int(lastSnapIndex)); n++ {
+	n := int32(rf.commitIndex.Load() + 1)
+	if rf.commitIndex.Load() < lastSnapIndex {
+		n = lastSnapIndex
+	}
+	for ; n < int32(len(logs)+int(lastSnapIndex)); n++ {
 		count := 1
-		// if logs[n].Term == rf.currentTerm.Load() {
 		if rf.getLogEntry(int(n)).Term == rf.currentTerm.Load() {
 			for peer := range rf.peers {
 				if peer != int(rf.me) && rf.matchIndex[peer].Load() >= n {
@@ -513,6 +546,9 @@ func (rf *Raft) getLastLogIndex() int {
 func (rf *Raft) getLastLogTerm() int32 {
 	rf.lock()
 	defer rf.unlock()
+	if len(rf.logs) == 0 {
+		return rf.lastSnapshottedTerm.Load()
+	}
 	lastLogIndex := len(rf.logs) - 1
 	return rf.logs[lastLogIndex].Term
 }
@@ -593,9 +629,19 @@ func (rf *Raft) startHeartbeatTicker() {
 }
 
 func (rf *Raft) sendAppendEntriesToAllPeers() {
-
 	for peer := range rf.peers {
 		if peer == int(rf.me) {
+			continue
+		}
+		if rf.nextIndex[peer].Load() < rf.lastSnapshottedIndex.Load() {
+			// Send Install Snapshot
+			request := &InstallSnapshotRequest{}
+			request.Term = rf.currentTerm.Load()
+			request.LeaderId = rf.me
+			request.LastIncludedIndex = int(rf.lastSnapshottedIndex.Load())
+			request.LastIncludedTerm = rf.lastSnapshottedTerm.Load()
+			request.Snapshot = rf.persister.ReadSnapshot()
+			go rf.sendInstallSnapshot(peer, request, &InstallSnapshotReply{})
 			continue
 		}
 		request := &AppendEntriesRequest{}
@@ -756,6 +802,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.on(EVENT_APPEND_ENTRIES, rf.handleAppendEntries, Follower|Candidate|Leader)
 	rf.on(EVENT_REQUEST_VOTE, rf.handleRequestVote, Follower|Candidate|Leader)
 	rf.on(EVENT_SHUTDOWN, rf.handleShutdown, Follower|Leader|Candidate)
+	rf.on(EVENT_INSTALL_SNAPSHOT, rf.handleInstallSnapshot, Follower|Candidate)
 	// start ticker goroutine to start elections
 	go rf.electionTicker()
 	go rf.serve()

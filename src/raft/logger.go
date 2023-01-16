@@ -31,8 +31,10 @@ func init() {
 
 	logger, _ = os.OpenFile(fmt.Sprintf("%v/logs", path), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
 
-	mwOut := io.MultiWriter(os.Stdout, logger)
-	mwErr := io.MultiWriter(os.Stderr, logger)
+	// mwOut := io.MultiWriter(os.Stdout, logger)
+	mwOut := io.MultiWriter(ioutil.Discard, logger)
+	// mwErr := io.MultiWriter(os.Stderr, logger)
+	mwErr := io.MultiWriter(ioutil.Discard, logger)
 	mwDebug := io.MultiWriter(ioutil.Discard)
 	mwVerbose := io.MultiWriter(ioutil.Discard)
 

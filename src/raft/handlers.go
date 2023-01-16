@@ -69,7 +69,6 @@ func (rf *Raft) handleEndElections(event *Event) {
 func (rf *Raft) handleAppendEntries(event *Event) {
 	request := event.Payload.(*AppendEntriesRequest)
 	rf.resetElectionTimer()
-	// defer rf.persist()
 	reply := &AppendEntriesReply{}
 	if request.Term < rf.currentTerm.Load() {
 		reply.Term = rf.currentTerm.Load()
@@ -90,7 +89,10 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 	reply.Success = false
 	reply.Term = rf.currentTerm.Load()
 	if request.PrevLogIndex > lastLogIndex {
-		if (request.PrevLogIndex > (int(rf.lastSnapshottedIndex.Load())-1) && rf.getLogEntry(request.PrevLogIndex).Term != request.PrevLogTerm) || (rf.lastSnapshottedTerm.Load() != request.PrevLogTerm) {
+		rf.lock()
+		entryExists := (request.PrevLogIndex - int(rf.lastSnapshottedIndex.Load())) < len(rf.logs)
+		rf.unlock()
+		if !entryExists || (request.PrevLogIndex > (int(rf.lastSnapshottedIndex.Load())-1) && rf.getLogEntry(request.PrevLogIndex).Term != request.PrevLogTerm) || (rf.lastSnapshottedTerm.Load() != request.PrevLogTerm) {
 			event.Response <- reply
 			return
 		}
@@ -100,10 +102,12 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 	i := request.PrevLogIndex + 1
 	for ; i < lastLogIndex+1 && j < len(request.Entries); i, j = i+1, j+1 {
 		// if rf.logs[i].Term != request.Entries[j].Term {
+		// rf.Out("LLI: %v, I: %v, LSI: %v", lastLogIndex, i, rf.lastSnapshottedIndex)
 		if rf.getLogEntry(i).Term != request.Entries[j].Term {
 			break
 		}
 	}
+
 	rf.lock()
 	i = i - int(rf.lastSnapshottedIndex.Load())
 	rf.logs = rf.logs[:i]
@@ -118,6 +122,38 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 	}
 	rf.persist()
 	event.Response <- reply
+}
+
+func (rf *Raft) handleInstallSnapshot(event *Event) {
+	request := event.Payload.(*InstallSnapshotRequest)
+	reply := &InstallSnapshotReply{}
+	reply.Term = rf.currentTerm.Load()
+	rf.resetElectionTimer()
+	if request.Term < rf.currentTerm.Load() {
+		event.Response <- reply
+		return
+	}
+	idx := -1
+	rf.lock()
+	for i, entry := range rf.logs {
+		if entry.Index == int32(request.LastIncludedIndex) && entry.Term == request.LastIncludedTerm {
+			idx = i
+			break
+		}
+	}
+	if idx > -1 {
+		rf.logs = rf.logs[idx+1:]
+	} else {
+		rf.logs = []LogEntry{}
+		rf.lastApplied.Store(int32(request.LastIncludedIndex) - 1)
+	}
+	rf.lastSnapshottedIndex.Store(int32(request.LastIncludedIndex))
+	rf.lastSnapshottedTerm.Store(request.LastIncludedTerm)
+	event.Response <- reply
+	rf.unlock()
+	state, _ := rf.generatePersistantState()
+	rf.persister.SaveStateAndSnapshot(state, request.Snapshot)
+	rf.applySnap(request.Snapshot)
 }
 
 func (rf *Raft) handleHeartbeats(event *Event) {
