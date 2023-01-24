@@ -984,8 +984,65 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			cfg.connect(i)
 		}
 	}
-
 	cfg.one(rand.Int()%10000, servers, true)
+
+	cfg.end()
+}
+func TestFigure8UnreliableSimple2C(t *testing.T) {
+	servers := 5
+	cfg := make_config(t, servers, true, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2C): Figure 8 (unreliable, simple)")
+
+	cmd := rand.Int() % 10000
+	cfg.one(cmd, 1, true)
+
+	nup := servers
+	for iters := 0; iters < 1000; iters++ {
+		// for iters := 0; iters < 25; iters++ {
+		if iters == 200 {
+			// if iters == 10 {
+			cfg.setlongreordering(true)
+		}
+		leader := -1
+		for i := 0; i < servers; i++ {
+			cmd := rand.Int() % 10000
+			_, _, ok := cfg.rafts[i].Start(cmd)
+			if ok && cfg.connected[i] {
+				leader = i
+			}
+		}
+
+		if (rand.Int() % 1000) < 100 {
+			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		} else {
+			ms := (rand.Int63() % 13)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+
+		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+			cfg.disconnect(leader)
+			nup -= 1
+		}
+
+		if nup < 3 {
+			s := rand.Int() % servers
+			if cfg.connected[s] == false {
+				cfg.connect(s)
+				nup += 1
+			}
+		}
+	}
+
+	for i := 0; i < servers; i++ {
+		if cfg.connected[i] == false {
+			cfg.connect(i)
+		}
+	}
+	cmd = rand.Int() % 10000
+	cfg.one(cmd, servers, true)
 
 	cfg.end()
 }
@@ -1143,6 +1200,49 @@ func TestUnreliableChurn2C(t *testing.T) {
 	internalChurn(t, true)
 }
 
+func TestAppendEntriesReorder2C(t *testing.T) {
+	servers := 5
+	cfg := make_config(t, servers, false, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2C): Reordering AppendEntries")
+	leader := cfg.checkOneLeader()
+	var term int
+	for i := 1; i < 6; i++ {
+		_, term, _ = cfg.rafts[leader].Start(i)
+	}
+	time.Sleep(2 * time.Second)
+	request := AppendEntriesRequest{
+		PrevLogIndex: 3,
+		LeaderCommit: cfg.rafts[leader].commitIndex.Load(),
+		Term:         cfg.rafts[leader].currentTerm.Load(),
+		LeaderId:     int32(leader),
+		PrevLogTerm:  cfg.rafts[leader].getLastLogTerm(),
+		Entries: []LogEntry{
+			{
+				Index:   4,
+				Term:    int32(term),
+				Command: 4,
+			},
+		},
+	}
+	server := 0
+	for server == leader {
+		server = (server + 1) % servers
+	}
+	cfg.rafts[leader].sendAppendEntries(server, &request, &AppendEntriesReply{})
+	cfg.disconnect(server)
+	time.Sleep(1 * time.Second)
+	cfg.rafts[server].lock()
+	cfg.rafts[leader].lock()
+	if len(cfg.rafts[server].logs) != len(cfg.rafts[leader].logs) {
+		t.Fatalf("Inconsistent Logs: Expected Log of size %v got Log of size %v", len(cfg.rafts[leader].logs), len(cfg.rafts[server].logs))
+	}
+	cfg.rafts[leader].unlock()
+	cfg.rafts[server].unlock()
+	cfg.end()
+}
+
 const MAXLOGSIZE = 2000
 
 func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash bool) {
@@ -1153,7 +1253,6 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 	defer cfg.cleanup()
 
 	cfg.begin(name)
-
 	cfg.one(rand.Int(), servers, true)
 	leader1 := cfg.checkOneLeader()
 	cfg.t.Log("Leader is", leader1)

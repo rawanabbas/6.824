@@ -60,14 +60,15 @@ type LogEntry struct {
 
 const (
 	Leader    int32 = 1
-	Candidate       = 2
-	Follower        = 4
+	Candidate int32 = 2
+	Follower  int32 = 4
 )
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.RWMutex // Lock to protect shared access to this peer's state
 	timerMu   sync.Mutex
+	snapMu    sync.Mutex
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int32               // this peer's index into peers[]
@@ -194,23 +195,26 @@ func (rf *Raft) lock() {
 	}
 	rf.mu.Lock()
 }
-func (rf *Raft) rlock() {
+
+func (rf *Raft) snapLock() {
 	if isVerbose {
 		buf := make([]byte, 10000)
 		runtime.Stack(buf, false)
-		rf.Verbose("RLocking, stack: %v", string(buf))
+		rf.Verbose("Snapshot Locking, stack: %v", string(buf))
 	}
-	rf.mu.RLock()
+	rf.snapMu.Lock()
+}
+
+func (rf *Raft) snapUnlock() {
+	rf.Verbose("Snap Unlocking")
+	rf.snapMu.Unlock()
 }
 
 func (rf *Raft) unlock() {
-	rf.Verbose("Unlocking")
+	rf.Verbose("Main Unlocking")
 	rf.mu.Unlock()
 }
-func (rf *Raft) runlock() {
-	rf.Verbose("RUnlocking")
-	rf.mu.RUnlock()
-}
+
 func (rf *Raft) lockTimer() {
 	if isVerbose {
 		buf := make([]byte, 10000)
@@ -313,11 +317,13 @@ func (rf *Raft) applyLogs() {
 			CommandIndex: int(entry.Index),
 		})
 	}
+
 	rf.unlock()
 	for _, msg := range messages {
 		rf.applyCh <- msg
 		rf.lastApplied.Store(int32(msg.CommandIndex))
 	}
+
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -335,12 +341,15 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.Debug("------------ Snapshot: %v", index)
+	rf.snapLock()
 	rf.lock()
 	defer rf.unlock()
 	arrIdx := index - int(rf.lastSnapshottedIndex.Load())
 	rf.lastSnapshottedIndex.Store(int32(index) + 1)
 	rf.lastSnapshottedTerm.Store(rf.logs[arrIdx].Term)
 	rf.logs = rf.logs[arrIdx+1:]
+	rf.snapUnlock()
 	buff := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buff)
 	if enc.Encode(rf.currentTerm.Load()) != nil || enc.Encode(rf.votedFor.Load()) != nil || enc.Encode(rf.logs) != nil || enc.Encode(rf.lastSnapshottedIndex.Load()) != nil || enc.Encode(rf.lastSnapshottedTerm.Load()) != nil {
@@ -423,8 +432,14 @@ func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest,
 }
 
 func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, reply *AppendEntriesReply) {
+	// start := time.Now()
+	// if len(request.Entries) > 0 {
+	// }
 	rf.Debug("sendAppendEntries to %v with entries %v", server, request.Entries)
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, &reply)
+	// if len(request.Entries) > 0 {
+	// } else if ok {
+	// }
 	if !ok {
 		return
 	}
@@ -451,6 +466,7 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 		return
 	}
 	rf.unlock()
+	rf.snapLock()
 	lastSnapIndex := rf.lastSnapshottedIndex.Load()
 	n := int32(rf.commitIndex.Load() + 1)
 	if rf.commitIndex.Load() < lastSnapIndex {
@@ -458,7 +474,7 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 	}
 	for ; n < int32(len(logs)+int(lastSnapIndex)); n++ {
 		count := 1
-		if rf.getLogEntry(int(n)).Term == rf.currentTerm.Load() {
+		if logs[n-lastSnapIndex].Term == rf.currentTerm.Load() {
 			for peer := range rf.peers {
 				if peer != int(rf.me) && rf.matchIndex[peer].Load() >= n {
 					count++
@@ -466,11 +482,15 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 			}
 		}
 		if count > len(rf.peers)/2 {
+			// if rf.commitIndex.Load() >= n {
+			// }
 			rf.setCommitIndex(int32(n))
+			// dur = time.Since(start)
 			go rf.applyLogs()
 			break
 		}
 	}
+	rf.snapUnlock()
 
 }
 
@@ -519,8 +539,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, entry)
 	rf.nextIndex[rf.me].Add(1)
 	rf.matchIndex[rf.me].Store(incIndex)
+
 	rf.unlock()
+
 	rf.persist()
+	defer func() {
+		event := rf.createEvent(EVENT_HEARTBEAT, nil, nil)
+		rf.heartbeatTicker.Reset(50 * time.Millisecond)
+		rf.emit(event, true)
+	}()
+
 	return int(incIndex), int(term), isLeader
 }
 
@@ -629,6 +657,8 @@ func (rf *Raft) startHeartbeatTicker() {
 }
 
 func (rf *Raft) sendAppendEntriesToAllPeers() {
+	rf.snapLock()
+	defer rf.snapUnlock()
 	for peer := range rf.peers {
 		if peer == int(rf.me) {
 			continue
@@ -714,16 +744,14 @@ func (rf *Raft) killed() bool {
 // heartsbeats recently.
 func (rf *Raft) serve() {
 	rf.Debug("Serving...")
-	for rf.killed() == false {
-		select {
-		case event := <-rf.eventCh:
-			if event.Name == EVENT_HEARTBEAT {
-				rf.Verbose("Event: %v", event.Name)
-			} else {
-				rf.Debug("Event: %v", event.Name)
-			}
-			rf.eventsHandlers[rf.state.Load()][event.Name](event)
+	for !rf.killed() {
+		event := <-rf.eventCh
+		if event.Name == EVENT_HEARTBEAT {
+			rf.Verbose("Event: %v", event.Name)
+		} else {
+			rf.Debug("Event: %v", event.Name)
 		}
+		rf.eventsHandlers[rf.state.Load()][event.Name](event)
 	}
 }
 
@@ -764,6 +792,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	// SetDebug(true)
 	// SetVerbose(true)
+	SuppressLogs()
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister

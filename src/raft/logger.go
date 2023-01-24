@@ -67,6 +67,14 @@ func SetVerbose(enabled bool) {
 	}
 }
 
+func SuppressLogs() {
+	Verbose.SetOutput(ioutil.Discard)
+	Debug.SetOutput(ioutil.Discard)
+	Out.SetOutput(ioutil.Discard)
+	Warn.SetOutput(ioutil.Discard)
+	Error.SetOutput(ioutil.Discard)
+}
+
 func (rf *Raft) Out(format string, args ...interface{}) {
 	Out.Output(2, fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.getStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...)))
 }

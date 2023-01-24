@@ -2,7 +2,6 @@ package raft
 
 func (rf *Raft) defaultHandler(event *Event) {
 	rf.Warn("Got an event %v while on state %v", event.Name, rf.getStateString())
-	return
 }
 
 func (rf *Raft) handleStartElections(event *Event) {
@@ -68,6 +67,8 @@ func (rf *Raft) handleEndElections(event *Event) {
 
 func (rf *Raft) handleAppendEntries(event *Event) {
 	request := event.Payload.(*AppendEntriesRequest)
+	if len(request.Entries) > 0 || request.LeaderCommit > rf.commitIndex.Load() {
+	}
 	rf.resetElectionTimer()
 	reply := &AppendEntriesReply{}
 	if request.Term < rf.currentTerm.Load() {
@@ -98,22 +99,33 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 		}
 	}
 
+	if len(request.Entries) > 0 && request.Entries[len(request.Entries)-1].Index <= rf.lastSnapshottedIndex.Load() {
+		reply.Success = true
+		event.Response <- reply
+		return
+	}
+
 	j := 0
 	i := request.PrevLogIndex + 1
+	lastSnapIdx := int(rf.lastSnapshottedIndex.Load())
 	for ; i < lastLogIndex+1 && j < len(request.Entries); i, j = i+1, j+1 {
-		// if rf.logs[i].Term != request.Entries[j].Term {
-		// rf.Out("LLI: %v, I: %v, LSI: %v", lastLogIndex, i, rf.lastSnapshottedIndex)
+		if i < lastSnapIdx {
+			continue
+		}
 		if rf.getLogEntry(i).Term != request.Entries[j].Term {
+			rf.lock()
+			idx := i - int(rf.lastSnapshottedIndex.Load())
+			rf.logs = rf.logs[:idx]
+			rf.unlock()
 			break
 		}
 	}
 
-	rf.lock()
-	i = i - int(rf.lastSnapshottedIndex.Load())
-	rf.logs = rf.logs[:i]
-	rf.unlock()
+	// rf.lock()
+	// idx := i - int(rf.lastSnapshottedIndex.Load())
+	// rf.logs = rf.logs[:idx]
+	// rf.unlock()
 	rf.addLogEntry(request.Entries[j:]...)
-	// rf.logs = append(rf.logs, request.Entries[j:]...)
 	reply.Success = true
 	if request.LeaderCommit > rf.commitIndex.Load() {
 		mn := min(int(request.LeaderCommit), rf.getLastLogIndex())
