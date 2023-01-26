@@ -1,16 +1,19 @@
 package kvraft
 
-import "6.824/porcupine"
-import "6.824/models"
-import "testing"
-import "strconv"
-import "time"
-import "math/rand"
-import "strings"
-import "sync"
-import "sync/atomic"
-import "fmt"
-import "io/ioutil"
+import (
+	"fmt"
+	"io/ioutil"
+	"math/rand"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"6.824-2022/models"
+	"6.824-2022/porcupine"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -145,7 +148,7 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 		}
 		off1 := strings.LastIndex(v, wanted)
 		if off1 != off {
-			t.Fatalf("duplicate element %v in Append result", wanted)
+			t.Fatalf("duplicate element %v in Append result got %v", wanted, v)
 		}
 		if off <= lastoff {
 			t.Fatalf("wrong order for element %v in Append result", wanted)
@@ -210,7 +213,6 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 // size) shouldn't exceed 8*maxraftstate. If maxraftstate is negative,
 // snapshots shouldn't be used.
 func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliable bool, crash bool, partitions bool, maxraftstate int, randomkeys bool) {
-
 	title := "Test: "
 	if unreliable {
 		// the network drops RPC requests and replies.
@@ -252,6 +254,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int)
 	}
+	time.Sleep(1 * time.Second)
 	for i := 0; i < 3; i++ {
 		// log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
@@ -259,11 +262,16 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
 			j := 0
 			defer func() {
+				// t.Log("Defer reached", cli, j)
 				clnts[cli] <- j
 			}()
 			last := "" // only used when not randomkeys
 			if !randomkeys {
+				// t.Log(cli, "==============Putting", strconv.Itoa(cli), "=", last)
 				Put(cfg, myck, strconv.Itoa(cli), last, opLog, cli)
+				// t.Log(cli, "==============Getting", strconv.Itoa(cli))
+				Get(cfg, myck, strconv.Itoa(cli), opLog, cli)
+				// t.Log(cli, "==============Got", v)
 			}
 			for atomic.LoadInt32(&done_clients) == 0 {
 				var key string
@@ -275,22 +283,28 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 				nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 				if (rand.Int() % 1000) < 500 {
 					// log.Printf("%d: client new append %v\n", cli, nv)
+					// t.Log(cli, "==============Appending", key, "=", nv)
 					Append(cfg, myck, key, nv, opLog, cli)
+					// t.Log(cli, "==============Appended1", key, "=", nv)
 					if !randomkeys {
 						last = NextValue(last, nv)
 					}
+					// t.Log(cli, "==============Appended2", key, "=", nv)
 					j++
 				} else if randomkeys && (rand.Int()%1000) < 100 {
 					// we only do this when using random keys, because it would break the
 					// check done after Get() operations
+					// t.Log(cli, "==============Putting", key, nv)
 					Put(cfg, myck, key, nv, opLog, cli)
 					j++
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)
+					t.Log(ck.leaderId.Load(), j, "==============Getting", key)
 					v := Get(cfg, myck, key, opLog, cli)
+					t.Log(ck.leaderId.Load(), j, "==============Got ", v, "xx")
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
-						t.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+						t.Fatalf("%v: get wrong value, key %v, wanted:\n%v\n, got\n%v\n", ck.leaderId.Load(), key, last, v)
 					}
 				}
 			}
@@ -302,7 +316,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			go partitioner(t, cfg, ch_partitioner, &done_partitioner)
 		}
 		time.Sleep(5 * time.Second)
-
+		t.Log("=====================DONEZO")
 		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
 		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
 
@@ -313,6 +327,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			// have submitted a request in a minority.  That request
 			// won't return until that server discovers a new term
 			// has started.
+			// fmt.Println("Reuniting all.............")
 			cfg.ConnectAll()
 			// wait for a while so that we have a new term
 			time.Sleep(electionTimeout)
@@ -334,19 +349,21 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			cfg.ConnectAll()
 		}
 
-		// log.Printf("wait for clients\n")
+		// log.Println("wait for clients")
 		for i := 0; i < nclients; i++ {
 			// log.Printf("read from clients %d\n", i)
 			j := <-clnts[i]
 			// if j < 10 {
 			// 	log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
 			// }
+			t.Log("finished reading")
 			key := strconv.Itoa(i)
 			// log.Printf("Check %v for client %d\n", j, i)
 			v := Get(cfg, ck, key, opLog, 0)
 			if !randomkeys {
 				checkClntAppends(t, i, v, j)
 			}
+			t.Log("eol")
 		}
 
 		if maxraftstate > 0 {
@@ -368,7 +385,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 
 	res, info := porcupine.CheckOperationsVerbose(models.KvModel, opLog.Read(), linearizabilityCheckTimeout)
 	if res == porcupine.Illegal {
-		file, err := ioutil.TempFile("", "*.html")
+		file, err := ioutil.TempFile("./", "*.html")
 		if err != nil {
 			fmt.Printf("info: failed to create temp file for visualization")
 		} else {
@@ -503,6 +520,7 @@ func TestOnePartition3A(t *testing.T) {
 
 	cfg.begin("Test: no progress in minority (3A)")
 	go func() {
+		t.Log("Putting 15 into 1......")
 		Put(cfg, ckp2a, "1", "15", nil, -1)
 		done0 <- true
 	}()
@@ -591,12 +609,10 @@ func TestPersistPartitionUnreliableLinearizable3A(t *testing.T) {
 	GenericTest(t, "3A", 15, 7, true, true, true, -1, true)
 }
 
-//
 // if one server falls behind, then rejoins, does it
 // recover by using the InstallSnapshot RPC?
 // also checks that majority discards committed log entries
 // even if minority doesn't respond.
-//
 func TestSnapshotRPC3B(t *testing.T) {
 	const nservers = 3
 	maxraftstate := 1000

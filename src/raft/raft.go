@@ -174,7 +174,7 @@ func (rf *Raft) addLogEntry(entries ...LogEntry) {
 	rf.logs = append(rf.logs, entries...)
 }
 
-func (rf *Raft) getStateString() string {
+func (rf *Raft) GetStateString() string {
 	var state string
 	switch rf.state.Load() {
 	case Follower:
@@ -777,6 +777,15 @@ func (rf *Raft) electionTicker() {
 			}
 		}
 	}
+}
+
+func (msg ApplyMsg) String() string {
+	str := fmt.Sprintf("[CommandValid: %v, Command: %v, CommandIndex: %v", msg.CommandValid, msg.Command, msg.CommandIndex)
+	if msg.SnapshotValid {
+		str = str + " " + fmt.Sprintf("SnapshotValid: %v, SnapShotTerm: %v, SnapshotIndex: %v", msg.SnapshotValid, msg.SnapshotTerm, msg.SnapshotIndex)
+	}
+	str = str + "]"
+	return str
 }
 
 // the service or tester wants to create a Raft server. the ports

@@ -279,7 +279,7 @@ func (rn *Network) processReq(req reqMsg) {
 		} else if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the reply, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
-		} else if longreordering == true && rand.Intn(900) < 600 {
+		} else if longreordering && rand.Intn(900) < 600 {
 			// delay the response for a while
 			ms := 200 + rand.Intn(1+rand.Intn(2000))
 			// Russ points out that this timer arrangement will decrease

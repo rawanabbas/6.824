@@ -1,7 +1,7 @@
 package raft
 
 func (rf *Raft) defaultHandler(event *Event) {
-	rf.Warn("Got an event %v while on state %v", event.Name, rf.getStateString())
+	rf.Warn("Got an event %v while on state %v", event.Name, rf.GetStateString())
 }
 
 func (rf *Raft) handleStartElections(event *Event) {

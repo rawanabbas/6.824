@@ -42,11 +42,11 @@ func init() {
 	red = color.New(color.FgRed).SprintFunc()
 	blue = color.New(color.FgBlue).SprintFunc()
 
-	Out = log.New(mwOut, "OUT: ", log.Ltime|log.Lshortfile)
-	Error = log.New(mwErr, red("ERROR: "), log.Ltime|log.Lshortfile)
-	Warn = log.New(mwErr, yellow("WARN: "), log.Ltime|log.Lshortfile)
-	Debug = log.New(mwDebug, blue("DEBUG: "), log.Ltime|log.Lshortfile)
-	Verbose = log.New(mwVerbose, blue("VERBOSE: "), log.Ltime|log.Lshortfile)
+	Out = log.New(mwOut, "[RAFT]OUT: ", log.Ltime|log.Lshortfile)
+	Error = log.New(mwErr, red("[RAFT]ERROR: "), log.Ltime|log.Lshortfile)
+	Warn = log.New(mwErr, yellow("[RAFT]WARN: "), log.Ltime|log.Lshortfile)
+	Debug = log.New(mwDebug, blue("[RAFT]DEBUG: "), log.Ltime|log.Lshortfile)
+	Verbose = log.New(mwVerbose, blue("[RAFT]VERBOSE: "), log.Ltime|log.Lshortfile)
 }
 
 func SetDebug(enabled bool) {
@@ -76,28 +76,28 @@ func SuppressLogs() {
 }
 
 func (rf *Raft) Out(format string, args ...interface{}) {
-	Out.Output(2, fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.getStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...)))
+	Out.Output(2, fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.GetStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...)))
 }
 
 func (rf *Raft) Debug(format string, args ...interface{}) {
 	color.Set(color.FgBlue)
-	Debug.Output(2, blue(fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.getStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...))))
+	Debug.Output(2, blue(fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.GetStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...))))
 	color.Unset()
 }
 func (rf *Raft) Verbose(format string, args ...interface{}) {
 	color.Set(color.FgBlue)
-	Verbose.Output(2, blue(fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.getStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...))))
+	Verbose.Output(2, blue(fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.GetStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...))))
 	color.Unset()
 }
 
 func (rf *Raft) Error(format string, args ...interface{}) {
 	color.Set(color.FgRed)
-	Error.Output(2, red(fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.getStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...))))
+	Error.Output(2, red(fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.GetStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...))))
 	color.Unset()
 }
 
 func (rf *Raft) Warn(format string, args ...interface{}) {
 	color.Set(color.FgYellow)
-	Warn.Output(2, yellow(fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.getStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...))))
+	Warn.Output(2, yellow(fmt.Sprintf("(%v/%v/T%v) %v\n", rf.me, rf.GetStateString(), rf.currentTerm.Load(), fmt.Sprintf(format, args...))))
 	color.Unset()
 }
