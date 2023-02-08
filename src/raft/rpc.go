@@ -26,8 +26,10 @@ type AppendEntriesRequest struct {
 }
 
 type AppendEntriesReply struct {
-	Term     int32
 	Success  bool
+	XIndex   int
+	XTerm    int32
+	Term     int32
 	LeaderId int32
 }
 
@@ -49,17 +51,15 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, reply *RequestVoteReply) {
 	replyCh := make(chan interface{})
 	event := rf.createEvent(EVENT_REQUEST_VOTE, request, replyCh)
 	rf.emit(event, false)
-	for {
-		select {
-		case resp := <-replyCh:
-			rf.Debug("Response: %v", resp)
-			r := resp.(*RequestVoteReply)
-			reply.Term = r.Term
-			reply.VoteGranted = r.VoteGranted
-			rf.persist()
-			rf.Debug("Reply: %v", reply)
-			return
-		}
+	for !rf.killed() {
+		resp := <-replyCh
+		rf.Debug("Response: %v", resp)
+		r := resp.(*RequestVoteReply)
+		reply.Term = r.Term
+		reply.VoteGranted = r.VoteGranted
+		rf.persist()
+		rf.Debug("Reply: %v", reply)
+		return
 	}
 }
 
@@ -68,15 +68,15 @@ func (rf *Raft) AppendEntries(request *AppendEntriesRequest, reply *AppendEntrie
 	replyCh := make(chan interface{})
 	event := rf.createEvent(EVENT_APPEND_ENTRIES, request, replyCh)
 	rf.emit(event, false)
-	for {
-		select {
-		case resp := <-replyCh:
-			r := resp.(*AppendEntriesReply)
-			reply.LeaderId = r.LeaderId
-			reply.Success = r.Success
-			reply.Term = r.Term
-			return
-		}
+	for !rf.killed() {
+		resp := <-replyCh
+		r := resp.(*AppendEntriesReply)
+		reply.LeaderId = r.LeaderId
+		reply.Success = r.Success
+		reply.Term = r.Term
+		reply.XIndex = r.XIndex
+		reply.XTerm = r.XTerm
+		return
 	}
 }
 
@@ -84,12 +84,10 @@ func (rf *Raft) InstallSnapshot(request *InstallSnapshotRequest, reply *InstallS
 	replyCh := make(chan interface{})
 	event := rf.createEvent(EVENT_INSTALL_SNAPSHOT, request, replyCh)
 	rf.emit(event, false)
-	for {
-		select {
-		case resp := <-replyCh:
-			r := resp.(*InstallSnapshotReply)
-			reply.Term = r.Term
-			return
-		}
+	for !rf.killed() {
+		resp := <-replyCh
+		r := resp.(*InstallSnapshotReply)
+		reply.Term = r.Term
+		return
 	}
 }

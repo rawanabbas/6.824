@@ -3,7 +3,6 @@ package raft
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -31,12 +30,12 @@ func init() {
 
 	logger, _ = os.OpenFile(fmt.Sprintf("%v/logs", path), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
 
-	// mwOut := io.MultiWriter(os.Stdout, logger)
-	mwOut := io.MultiWriter(ioutil.Discard, logger)
-	// mwErr := io.MultiWriter(os.Stderr, logger)
-	mwErr := io.MultiWriter(ioutil.Discard, logger)
-	mwDebug := io.MultiWriter(ioutil.Discard)
-	mwVerbose := io.MultiWriter(ioutil.Discard)
+	mwOut := io.MultiWriter(os.Stdout, logger)
+	// mwOut := io.MultiWriter(ioutil.Discard, logger)
+	mwErr := io.MultiWriter(os.Stderr, logger)
+	// mwErr := io.MultiWriter(ioutil.Discard, logger)
+	mwDebug := io.MultiWriter(io.Discard)
+	mwVerbose := io.MultiWriter(io.Discard)
 
 	yellow = color.New(color.FgYellow).SprintFunc()
 	red = color.New(color.FgRed).SprintFunc()
@@ -54,7 +53,7 @@ func SetDebug(enabled bool) {
 		mwDebug := io.MultiWriter(os.Stdout, logger)
 		Debug.SetOutput(mwDebug)
 	} else {
-		Debug.SetOutput(ioutil.Discard)
+		Debug.SetOutput(io.Discard)
 	}
 }
 func SetVerbose(enabled bool) {
@@ -63,16 +62,16 @@ func SetVerbose(enabled bool) {
 		mwVerbose := io.MultiWriter(os.Stdout, logger)
 		Verbose.SetOutput(mwVerbose)
 	} else {
-		Verbose.SetOutput(ioutil.Discard)
+		Verbose.SetOutput(io.Discard)
 	}
 }
 
 func SuppressLogs() {
-	Verbose.SetOutput(ioutil.Discard)
-	Debug.SetOutput(ioutil.Discard)
-	Out.SetOutput(ioutil.Discard)
-	Warn.SetOutput(ioutil.Discard)
-	Error.SetOutput(ioutil.Discard)
+	Verbose.SetOutput(io.Discard)
+	Debug.SetOutput(io.Discard)
+	Out.SetOutput(io.Discard)
+	Warn.SetOutput(io.Discard)
+	Error.SetOutput(io.Discard)
 }
 
 func (rf *Raft) Out(format string, args ...interface{}) {

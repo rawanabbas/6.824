@@ -187,6 +187,7 @@ func TestRPCBytes2B(t *testing.T) {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
 		sent += int64(len(cmd))
+		cfg.t.Log("Bytes total: ", cfg.bytesTotal())
 	}
 
 	bytes1 := cfg.bytesTotal()
@@ -624,7 +625,7 @@ func TestCount2B(t *testing.T) {
 		return
 	}
 
-	leader := cfg.checkOneLeader()
+	_ = cfg.checkOneLeader()
 
 	total1 := rpcs()
 
@@ -634,6 +635,7 @@ func TestCount2B(t *testing.T) {
 
 	var total2 int
 	var success bool
+	var leader int
 loop:
 	for try := 0; try < 5; try++ {
 		if try > 0 {
@@ -861,25 +863,30 @@ func TestFigure82C(t *testing.T) {
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
+		t.Log("Iteration", iters)
 		leader := -1
 		for i := 0; i < servers; i++ {
 			if cfg.rafts[i] != nil {
 				_, _, ok := cfg.rafts[i].Start(rand.Int())
 				if ok {
 					leader = i
+					t.Log("Leader is", i)
 				}
 			}
 		}
 
 		if (rand.Int() % 1000) < 100 {
 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
+			t.Log("Sleep1", ms)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		} else {
 			ms := (rand.Int63() % 13)
+			t.Log("Sleep2", ms)
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 
 		if leader != -1 {
+			t.Log("Crashing", leader)
 			cfg.crash1(leader)
 			nup -= 1
 		}
@@ -887,7 +894,9 @@ func TestFigure82C(t *testing.T) {
 		if nup < 3 {
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
+				t.Log("1 start1", s)
 				cfg.start1(s, cfg.applier)
+				t.Log("1 connect", s)
 				cfg.connect(s)
 				nup += 1
 			}
@@ -896,12 +905,16 @@ func TestFigure82C(t *testing.T) {
 
 	for i := 0; i < servers; i++ {
 		if cfg.rafts[i] == nil {
+			t.Log("2 start1", i)
 			cfg.start1(i, cfg.applier)
+			t.Log("2 connect", i)
 			cfg.connect(i)
 		}
 	}
-
-	cfg.one(rand.Int(), servers, true)
+	cmd := rand.Int()
+	t.Log("Agreeing on", cmd)
+	cfg.one(cmd, servers, true)
+	t.Log("Finshed agreeing on", cmd)
 
 	cfg.end()
 }
@@ -988,6 +1001,154 @@ func TestFigure8Unreliable2C(t *testing.T) {
 
 	cfg.end()
 }
+func TestXIndexBug2C(t *testing.T) {
+	servers := 5
+	cfg := make_config(t, servers, false, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2C): XIndexBug")
+
+	leader := cfg.checkOneLeader()
+	t.Log("Leader is ", leader)
+
+	cmd := rand.Int() % 10000
+	t.Log("Agreeing on", cmd)
+	cfg.one(cmd, servers, true)
+	t.Log("Agreed on", cmd)
+
+	index := -1
+	for i := 0; i < 10; i++ {
+		index = cfg.one(i, servers, false)
+	}
+	term := int32(cfg.rafts[leader].currentTerm.Load())
+	victim := (leader + 1) % servers
+
+	t.Log("Disconnecting victim", victim)
+	cfg.disconnect(victim)
+	cfg.rafts[victim].addLogEntry(
+		LogEntry{Index: int32(index + 1), Term: term + 1, Command: 201},
+		LogEntry{Index: int32(index + 2), Term: term + 1, Command: 202},
+		LogEntry{Index: int32(index + 3), Term: term + 1, Command: 203},
+		LogEntry{Index: int32(index + 4), Term: term + 1, Command: 204},
+		LogEntry{Index: int32(index + 5), Term: term + 1, Command: 205},
+		LogEntry{Index: int32(index + 6), Term: term + 1, Command: 206},
+		LogEntry{Index: int32(index + 7), Term: term + 1, Command: 207},
+		LogEntry{Index: int32(index + 8), Term: term + 1, Command: 208},
+		LogEntry{Index: int32(index + 9), Term: term + 1, Command: 209},
+		LogEntry{Index: int32(index + 10), Term: term + 1, Command: 210},
+		LogEntry{Index: int32(index + 11), Term: term + 1, Command: 211},
+		LogEntry{Index: int32(index + 12), Term: term + 1, Command: 212},
+	)
+
+	for i := 0; i < 5; i++ {
+		cfg.one(300+i, servers-1, false)
+	}
+
+	time.Sleep(1 * time.Second)
+	t.Log("Disconnecting leader", leader)
+	cfg.disconnect(leader)
+	time.Sleep(2 * time.Second)
+	leader2 := cfg.checkOneLeader()
+	t.Log("leader2", leader2)
+	t.Log("Reconnecting old leader", leader)
+	cfg.connect(leader)
+	time.Sleep(1 * time.Second)
+
+	t.Log("Disconnecting leader2", leader2)
+	cfg.disconnect(leader2)
+	time.Sleep(2 * time.Second)
+	leader3 := cfg.checkOneLeader()
+	t.Log("New leader", leader3)
+	t.Log("Reconnecting old leader", leader2)
+	cfg.connect(leader2)
+	time.Sleep(1 * time.Second)
+
+	for i := 0; i < 5; i++ {
+		cfg.one(100+i, servers-1, false)
+	}
+
+	t.Log("Reconnecting victim", victim)
+	cfg.connect(victim)
+	time.Sleep(2 * time.Second)
+	leader4 := cfg.checkOneLeader()
+	t.Log("Current leader", leader4)
+
+	cmd = 1000
+	t.Log("Agreeing on", cmd)
+	cfg.one(cmd, servers, true)
+	t.Log("Agreed on", cmd)
+
+	cfg.end()
+}
+
+// func TestFigure8v2Unreliable2C(t *testing.T) {
+// 	servers := 5
+// 	cfg := make_config(t, servers, true, false)
+// 	defer cfg.cleanup()
+
+// 	cfg.begin("Test (2C): Figure 8 (unreliable) v2")
+
+// 	cmd := rand.Int() % 10000
+// 	t.Log("Agreeing on", cmd)
+// 	cfg.one(cmd, 1, true)
+// 	t.Log("Agreed on", cmd)
+
+// 	nup := servers
+// 	for iters := 0; iters < 1000; iters++ {
+// 		t.Log("iteration", iters)
+// 		if iters == 200 {
+// 			t.Log("setlongreordering")
+// 			cfg.setlongreordering(true)
+// 		}
+// 		leader := -1
+// 		for i := 0; i < servers; i++ {
+// 			cmd = rand.Int() % 10000
+// 			idx, term, ok := cfg.rafts[i].Start(cmd)
+// 			if ok && cfg.connected[i] {
+// 				leader = i
+// 				t.Log("Sent", cmd, "to", leader, "got idx", idx, "term", term)
+// 			}
+// 		}
+
+// 		if (rand.Int() % 1000) < 100 {
+// 			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
+// 			t.Log("Sleep1", ms)
+// 			time.Sleep(time.Duration(ms) * time.Millisecond)
+// 		} else {
+// 			ms := (rand.Int63() % 13)
+// 			t.Log("Sleep2", ms)
+// 			time.Sleep(time.Duration(ms) * time.Millisecond)
+// 		}
+
+// 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+// 			t.Log("1Disconnecting", leader)
+// 			cfg.disconnect(leader)
+// 			nup -= 1
+// 		}
+
+// 		if nup < 3 {
+// 			s := rand.Int() % servers
+// 			if cfg.connected[s] == false {
+// 				t.Log("1Connecting", s)
+// 				cfg.connect(s)
+// 				nup += 1
+// 			}
+// 		}
+// 	}
+
+// 	for i := 0; i < servers; i++ {
+// 		if cfg.connected[i] == false {
+// 			t.Log("2Connecting", i)
+// 			cfg.connect(i)
+// 		}
+// 	}
+// 	cmd = rand.Int() % 10000
+// 	t.Log("Agreeing on", cmd)
+// 	cfg.one(cmd, servers, true)
+// 	t.Log("Agreed on", cmd)
+
+//		cfg.end()
+//	}
 func TestFigure8UnreliableSimple2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true, false)
@@ -1118,21 +1279,29 @@ func internalChurn(t *testing.T, unreliable bool) {
 	for iters := 0; iters < 20; iters++ {
 		if (rand.Int() % 1000) < 200 {
 			i := rand.Int() % servers
+			cfg.t.Log("Disconnecting", i)
 			cfg.disconnect(i)
+			cfg.t.Log("Disconnected", i)
 		}
 
 		if (rand.Int() % 1000) < 500 {
 			i := rand.Int() % servers
 			if cfg.rafts[i] == nil {
+				cfg.t.Log("Start1", i)
 				cfg.start1(i, cfg.applier)
+				cfg.t.Log("Start1'd", i)
 			}
+			cfg.t.Log("Reconnecting", i)
 			cfg.connect(i)
+			cfg.t.Log("Reconnected", i)
 		}
 
 		if (rand.Int() % 1000) < 200 {
 			i := rand.Int() % servers
 			if cfg.rafts[i] != nil {
+				cfg.t.Log("Crashing", i)
 				cfg.crash1(i)
+				cfg.t.Log("Crashed", i)
 			}
 		}
 
@@ -1269,18 +1438,26 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		if disconnect {
 			cfg.t.Log("Disconnecting", victim)
 			cfg.disconnect(victim)
-			cfg.one(rand.Int(), servers-1, true)
+			cfg.t.Log("Disconnected", victim)
+			cmd := rand.Int()
+			cfg.t.Log("Agreeing on", cmd)
+			cfg.one(cmd, servers-1, true)
+			cfg.t.Log("Cons. after DC", victim, "cmd", cmd)
 		}
 		if crash {
-			cfg.crash1(victim)
 			cfg.t.Log("Crashing", victim)
+			cfg.crash1(victim)
+			cfg.t.Log("Crashed", victim)
 			cfg.one(rand.Int(), servers-1, true)
 		}
 
 		// perhaps send enough to get a snapshot
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
 		for i := 0; i < nn; i++ {
-			cfg.rafts[sender].Start(rand.Int())
+			cmd := rand.Int()
+			cfg.t.Log("Sending", cmd, "to", sender)
+			cfg.rafts[sender].Start(cmd)
+			cfg.t.Log("Sent", cmd, "to", sender)
 		}
 
 		// let applier threads catch up with the Start()'s
@@ -1290,7 +1467,10 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// TestSnapshotBasic2D().
 			cfg.one(rand.Int(), servers, true)
 		} else {
-			cfg.one(rand.Int(), servers-1, true)
+			cmd := rand.Int()
+			cfg.t.Log("Agreeing on", cmd, "with", servers-1)
+			cfg.one(cmd, servers-1, true)
+			cfg.t.Log("Agreed on", cmd, "with", servers-1)
 		}
 
 		if cfg.LogSize() >= MAXLOGSIZE {
@@ -1301,7 +1481,11 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			// needs to rceive a snapshot to catch up.
 			cfg.t.Log("Reconnecting", victim)
 			cfg.connect(victim)
-			cfg.one(rand.Int(), servers, true)
+			cfg.t.Log("Reconnected", victim)
+			cmd := rand.Int()
+			cfg.t.Log("Agreeing on", cmd)
+			cfg.one(cmd, servers, true)
+			cfg.t.Log("Agreed on", cmd)
 			leader1 = cfg.checkOneLeader()
 			cfg.t.Log("New leader", leader1)
 		}
@@ -1313,6 +1497,46 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			leader1 = cfg.checkOneLeader()
 			cfg.t.Log("New leader", leader1)
 		}
+	}
+	cfg.end()
+}
+
+func TestSnapshotWithDisconnect2D(t *testing.T) {
+	servers := 3
+	name := "TestSnapshotWithDisconnect2D"
+	unreliable := false
+	cfg := make_config(t, servers, unreliable, true)
+	cfg.t.Log(name)
+	defer cfg.cleanup()
+
+	cfg.begin(name)
+	cfg.one(rand.Int(), servers, true)
+	leader := cfg.checkOneLeader()
+	cfg.t.Log("Leader is", leader)
+	//Will snap at 8
+	for i := 1; i < 8-2; i++ {
+		_, _, _ = cfg.rafts[leader].Start(i + 1)
+	}
+	// Snapshot happens at entry: 9: 9
+	time.Sleep(1 * time.Second)
+	cfg.t.Log("Disconnecting: ", leader)
+	cfg.disconnect(leader)
+	cfg.rafts[leader].Start(100)
+	cfg.rafts[leader].Start(101)
+	cfg.rafts[leader].Start(102)
+	cfg.one(200, servers-1, false)
+	cfg.one(201, servers-1, false)
+	cfg.one(202, servers-1, false)
+	time.Sleep(1 * time.Second)
+	cfg.t.Log("Reconnecting: ", leader)
+	cfg.connect(leader)
+	// time.Sleep(1 * time.Second)
+	cfg.one(203, servers, true)
+	for i := 0; i < servers; i++ {
+		cfg.rafts[i].lock()
+		// fmt.Println(i, cfg.logs[i])
+		// fmt.Println(i, cfg.rafts[i].logs)
+		cfg.rafts[i].unlock()
 	}
 	cfg.end()
 }
