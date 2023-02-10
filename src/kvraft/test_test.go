@@ -267,11 +267,11 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			}()
 			last := "" // only used when not randomkeys
 			if !randomkeys {
-				// t.Log(cli, "==============Putting", strconv.Itoa(cli), "=", last)
+				t.Log(cli, "==============Putting", strconv.Itoa(cli), "=", last)
 				Put(cfg, myck, strconv.Itoa(cli), last, opLog, cli)
-				// t.Log(cli, "==============Getting", strconv.Itoa(cli))
+				t.Log(cli, "==============Getting", strconv.Itoa(cli))
 				Get(cfg, myck, strconv.Itoa(cli), opLog, cli)
-				// t.Log(cli, "==============Got", v)
+				t.Log(cli, "==============Got sth")
 			}
 			for atomic.LoadInt32(&done_clients) == 0 {
 				var key string
@@ -283,9 +283,9 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 				nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 				if (rand.Int() % 1000) < 500 {
 					// log.Printf("%d: client new append %v\n", cli, nv)
-					// t.Log(cli, "==============Appending", key, "=", nv)
+					t.Log(cli, "==============Appending", key, "=", nv)
 					Append(cfg, myck, key, nv, opLog, cli)
-					// t.Log(cli, "==============Appended1", key, "=", nv)
+					t.Log(cli, "==============Appended1", key, "=", nv)
 					if !randomkeys {
 						last = NextValue(last, nv)
 					}
@@ -301,7 +301,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 					// log.Printf("%d: client new get %v\n", cli, key)
 					t.Log(ck.leaderId.Load(), j, "==============Getting", key)
 					v := Get(cfg, myck, key, opLog, cli)
-					t.Log(ck.leaderId.Load(), j, "==============Got ", v, "xx")
+					t.Log(ck.leaderId.Load(), j, "==============Got sth")
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
 						t.Fatalf("%v: get wrong value, key %v, wanted:\n%v\n, got\n%v\n", ck.leaderId.Load(), key, last, v)
@@ -335,18 +335,25 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 
 		if crash {
 			// log.Printf("shutdown servers\n")
+			t.Log("XXXXXXXXXXXXXXXXXXXXXXXXXXX SHUTTING DOWN")
 			for i := 0; i < nservers; i++ {
+				t.Log("XXXXXXXXXXXXXXXXXXXXXXXXXXX SHUTTING DOWN", i)
+				fmt.Println("ooooooooooooooooooooooo", i)
 				cfg.ShutdownServer(i)
+				t.Log("XXXXXXXXXXXXXXXXXXXXXXXXXXX FINISHED SHUTTING DOWN", i)
 			}
+			t.Log("XXXXXXXXXXXXXXXXXXXXXXXXXXX F SHUTTING DOWN")
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
+			t.Log("XXXXXXXXXXXXXXXXXXXXXXXXXXX F SHUTDOWN SLEEP")
 			// log.Printf("restart servers\n")
 			// crash and re-start all
 			for i := 0; i < nservers; i++ {
 				cfg.StartServer(i)
 			}
 			cfg.ConnectAll()
+			t.Log("XXXXXXXXXXXXXXXXXXXXXXXXXXX RESUMED")
 		}
 
 		// log.Println("wait for clients")

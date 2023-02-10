@@ -164,7 +164,6 @@ func (rf *Raft) getLogEntry(index int) (entry LogEntry) {
 	rf.lock()
 	defer rf.unlock()
 	firstIdx := rf.lastSnapshottedIndex.Load()
-	rf.Debug("getenntry---- %v %v", index, firstIdx)
 	entry = rf.logs[index-int(firstIdx)]
 	return
 }
@@ -392,19 +391,19 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	}
 
 	if reply.Term < rf.currentTerm.Load() {
-		rf.Out("Received an out-dated election response ignoring...")
+		rf.Out("Received an out-dated election response ignoring from %v/T%v...", server, reply.Term)
 		return
 	}
 
 	if reply.Term > rf.currentTerm.Load() {
 		// Step Down to Follower
-		rf.Out("We are out-dated waiting for a leader to sync")
+		rf.Out("We are out-dated waiting for a leader to sync %v/T%v", server, reply.Term)
 		rf.stepDownToFollower(reply.Term)
 		rf.persist()
 		results <- false
 		return
 	}
-
+	rf.Debug("Received a vote [%v] from %v/T%v", reply.VoteGranted, server, reply.Term)
 	results <- reply.VoteGranted
 }
 
@@ -419,28 +418,32 @@ func (rf *Raft) sendInstallSnapshot(server int, request *InstallSnapshotRequest,
 		rf.Error("Couldn't Send InstallSnapshot Request to %v", server)
 		return
 	}
-	// TODO: What to do with the reply?
-	// Should I change nextIndex[server] to be lastSnapshottedIndex
+
 	if reply.Term > rf.currentTerm.Load() {
-		// TODO:
 		rf.stepDownToFollower(reply.Term)
 		return
 	}
 	rf.lock()
-	rf.nextIndex[server].Store(rf.lastSnapshottedIndex.Load())
+	rf.nextIndex[server].Store(int32(request.LastIncludedIndex))
 	rf.unlock()
 }
 
 func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, reply *AppendEntriesReply) {
+	if rf.state.Load() != Leader {
+		rf.Debug("sendAppendEntries, but not a leader anymore")
+		return
+	}
 	rf.Debug("sendAppendEntries to %v with entries %v", server, request.Entries)
 	ok := rf.peers[server].Call("Raft.AppendEntries", request, &reply)
 	if !ok {
+		rf.Debug("failed to sendAppendEntries to %v", server)
 		return
 	}
 
 	defer rf.persist()
 
 	if reply.Term > request.Term {
+		rf.Debug("reply.Term %v > request.Term %v", reply.Term, request.Term)
 		rf.stepDownToFollower(reply.Term)
 		rf.setLeader(reply.LeaderId)
 		return
@@ -463,22 +466,28 @@ func (rf *Raft) sendAppendEntries(server int, request *AppendEntriesRequest, rep
 				if xterm == reply.XTerm {
 					// Leader has XTerm so nextIndex is last entry for that term
 					isNextIndexUpdated = true
-					rf.Debug("Leader has XTerm Setting Peer %v's Next Index %v", server, xidx+1)
-					rf.setNextIndex(server, xidx+1)
+					nextIndex := min(int(xidx+1), int(rf.nextIndex[server].Load()))
+					rf.Debug("Leader has XTerm Setting Peer %v's Next Index %v", server, nextIndex)
+					rf.setNextIndex(server, int32(nextIndex))
 					break
 				}
 
 				if xterm < reply.XTerm {
 					// Leader doesn't have XTerm
-					rf.Debug("Leader doesn't have XTerm Setting Peer %v's Next Index %v", server, reply.XIndex)
 					isNextIndexUpdated = true
-					rf.setNextIndex(server, int32(reply.XIndex))
+					nextIndex := min(reply.XIndex, int(rf.nextIndex[server].Load()))
+					rf.Debug("Leader doesn't have XTerm Setting Peer %v's Next Index %v", server, nextIndex)
+					rf.setNextIndex(server, int32(nextIndex))
 					break
 				}
 			}
 
 			if !isNextIndexUpdated {
-				rf.setNextIndex(server, rf.lastSnapshottedIndex.Load())
+				if rf.lastSnapshottedIndex.Load() != 0 {
+					rf.setNextIndex(server, rf.lastSnapshottedIndex.Load()-1)
+				} else {
+					rf.setNextIndex(server, 1)
+				}
 			}
 		}
 	}
@@ -734,6 +743,7 @@ func (rf *Raft) resetVoltaileState() {
 	lastLogIndex := rf.getLastLogIndex()
 	rf.nextIndex = make([]atomic.Int32, len(rf.peers))
 	rf.matchIndex = make([]atomic.Int32, len(rf.peers))
+	rf.lock()
 	for peer := range rf.peers {
 		// if rf.lastSnapshottedIndex.Load() == 0 {
 		rf.setMatchIndex(peer, 0)
@@ -742,6 +752,7 @@ func (rf *Raft) resetVoltaileState() {
 		// }
 		rf.setNextIndex(peer, int32(lastLogIndex)+1)
 	}
+	rf.unlock()
 }
 
 func (rf *Raft) startHearbeat() {

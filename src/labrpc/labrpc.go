@@ -221,6 +221,7 @@ func (rn *Network) isServerDead(endname interface{}, servername interface{}, ser
 
 func (rn *Network) processReq(req reqMsg) {
 	enabled, servername, server, reliable, longreordering := rn.readEndnameInfo(req.endname)
+	// fmt.Printf("Handling request %v, svcname: %v, server: %v\n", req, servername, server)
 
 	if enabled && servername != nil && server != nil {
 		if reliable == false {

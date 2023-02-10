@@ -1,12 +1,15 @@
 package kvraft
 
 import (
+	"bytes"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"6.824-2022/labgob"
 	"6.824-2022/labrpc"
+	"6.824-2022/logger"
 	"6.824-2022/raft"
 )
 
@@ -32,6 +35,7 @@ type KVServer struct {
 	// Your definitions here.
 	db          map[string]string
 	responses   map[int]chan Op
+	snapshot    chan int
 	lastRequest map[int64]int64
 }
 
@@ -57,7 +61,7 @@ func (kv *KVServer) Get(request *GetRequest, reply *GetReply) {
 		if !ok {
 			reply.Err = ErrNoKey
 			kv.unlock()
-			kv.Error("No Key Found %v", op.Key)
+			kv.Error("No Key -{%v}- Found", op.Key)
 			kv.Debug("No Key Found Returning")
 			return
 		}
@@ -143,8 +147,18 @@ func (kv *KVServer) isEqualOp(op1 Op, op2 Op) bool {
 // about this, but it may be convenient (for example)
 // to suppress debug output from a Kill()ed instance.
 func (kv *KVServer) Kill() {
-	atomic.StoreInt32(&kv.dead, 1)
 	kv.rf.Kill()
+	kv.Debug("Waiting for Raft to be killed")
+	for !kv.rf.Killed() {
+		time.Sleep(50 * time.Millisecond)
+	}
+	kv.Debug("Raft killed")
+	atomic.StoreInt32(&kv.dead, 1)
+	kv.Debug("Waiting for KV server to be killed")
+	for !kv.killed() {
+		time.Sleep(50 * time.Millisecond)
+	}
+	kv.Debug("KV server killed")
 	// Your code here, if desired.
 }
 
@@ -163,7 +177,7 @@ func (kv *KVServer) unlock() {
 	kv.mu.Unlock()
 }
 
-func (kv *KVServer) listenOnApplyCh() {
+func (kv *KVServer) applier(persister *raft.Persister) {
 	for !kv.killed() {
 		kv.Debug("Waiting for MSG on ApplyChannel")
 		msg := <-kv.applyCh
@@ -171,25 +185,21 @@ func (kv *KVServer) listenOnApplyCh() {
 		if msg.CommandValid {
 			op := msg.Command.(Op)
 			kv.Debug("Sending on Channel Index %v", msg.CommandIndex)
+
 			kv.lock()
-			kv.Debug("Got lock!")
 			rid, ok := kv.lastRequest[op.ClientId]
 			ch, hasChannel := kv.responses[msg.CommandIndex]
-			if ok && rid >= op.RequestId {
-				kv.unlock()
-				go func(ch chan Op) {
-					ch <- op
-				}(ch)
-				continue
-			}
-			kv.lastRequest[op.ClientId] = op.RequestId
-			switch op.Type {
-			case PutOp:
-				kv.db[op.Key] = op.Value
-			case AppendOp:
-				kv.db[op.Key] += op.Value
-			case GetOp:
-				op.Value = kv.db[op.Key]
+			if !(ok && rid >= op.RequestId) {
+				// It is a new request
+				kv.lastRequest[op.ClientId] = op.RequestId
+				switch op.Type {
+				case PutOp:
+					kv.db[op.Key] = op.Value
+				case AppendOp:
+					kv.db[op.Key] += op.Value
+				case GetOp:
+					op.Value = kv.db[op.Key]
+				}
 			}
 			kv.unlock()
 			if hasChannel {
@@ -199,9 +209,43 @@ func (kv *KVServer) listenOnApplyCh() {
 			} else {
 				kv.Debug("cant send, no channel")
 			}
-		} //else if msg.SnapshotValid {
-		// TODO
-		//}
+			if kv.maxraftstate >= 0 && persister.RaftStateSize() >= kv.maxraftstate {
+				kv.Debug("Snapshotting!! %v %v --- %v", msg.CommandIndex, persister.RaftStateSize(), kv.maxraftstate)
+				// kv.snapshot <- msg.CommandIndex
+				kv.lock()
+
+				kv.Debug("Sent snap %v", msg.CommandIndex)
+				data, err := kv.generateSnapshot()
+				if err != nil {
+					kv.Error("An error has occured while generating the snapshot!")
+				}
+				kv.Debug("Calling snap %v", msg.CommandIndex)
+				kv.rf.Snapshot(msg.CommandIndex, data)
+				kv.Debug("Called snap %v", msg.CommandIndex)
+				kv.unlock()
+			}
+		} else if msg.SnapshotValid {
+			// TODO:
+			kv.readSnapshot(msg.Snapshot)
+		}
+	}
+	kv.Debug("Killed")
+}
+
+func (kv *KVServer) snapshotter() {
+	if kv.maxraftstate < 0 {
+		return
+	}
+	for !kv.killed() {
+		kv.Debug("=========waiting for kv.snapshot")
+		index := <-kv.snapshot
+		kv.Debug("=========recv'd %v", index)
+		data, err := kv.generateSnapshot()
+		if err != nil {
+			kv.Error("An error has occured while generating the snapshot!")
+		}
+		kv.rf.Snapshot(index, data)
+		kv.Debug("finish snap %v", index)
 	}
 }
 
@@ -220,16 +264,51 @@ func (kv *KVServer) sendToStateMachine(op Op) (Err, *Op) {
 	if !ok {
 		kv.responses[index] = make(chan Op)
 	}
+	ch := kv.responses[index]
 	kv.unlock()
-	kv.Debug("====================================Waiting for application %v  -  %v", index, op.RequestId)
+	kv.Debug("Waiting for application %v  -  %v", index, op.RequestId)
 	select {
-	case appliedOp := <-kv.responses[index]:
-		kv.Debug("Applied================================================== %v  -   %v", index, appliedOp.RequestId)
+	case appliedOp := <-ch:
+		kv.Debug("Applied %v  -   %v", index, appliedOp.RequestId)
 		return OK, &appliedOp
 	case <-time.After(1 * time.Second):
-		kv.Debug("timedout================================================== %v  -   %v", index, op.RequestId)
+		kv.Debug("timedout %v  -   %v", index, op.RequestId)
 		return ErrTimeout, nil
 	}
+
+}
+
+func (kv *KVServer) generateSnapshot() ([]byte, error) {
+	// kv.lock()
+	// defer kv.unlock()
+	buff := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buff)
+	if enc.Encode(kv.db) != nil || enc.Encode(kv.lastRequest) != nil {
+		return nil, fmt.Errorf("cannot generate snapshot")
+	}
+	return buff.Bytes(), nil
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	kv.lock()
+	defer kv.unlock()
+
+	if data == nil || len(data) < 1 {
+		return
+	}
+
+	buff := bytes.NewBuffer(data)
+	dec := labgob.NewDecoder(buff)
+	var db map[string]string
+	var lastRequest map[int64]int64
+
+	if dec.Decode(&db) != nil || dec.Decode(&lastRequest) != nil {
+		kv.Error("Failed to recover snapshot data")
+		return
+	}
+
+	kv.db = db
+	kv.lastRequest = lastRequest
 
 }
 
@@ -248,8 +327,10 @@ func (kv *KVServer) sendToStateMachine(op Op) (Err, *Op) {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	// logger.SetDebug(true)
+	logger.SetDebug(true)
 	labgob.Register(Op{})
+
+	SetLoggerPrefixes()
 
 	kv := new(KVServer)
 	kv.me = me
@@ -257,11 +338,16 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.responses = make(map[int]chan Op)
+	kv.snapshot = make(chan int)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.db = make(map[string]string)
 	kv.lastRequest = make(map[int64]int64)
-	go kv.listenOnApplyCh()
+
+	kv.readSnapshot(persister.ReadSnapshot())
+
+	go kv.applier(persister)
+	// go kv.snapshotter()
 	// You may need initialization code here.
 	return kv
 }

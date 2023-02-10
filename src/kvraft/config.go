@@ -257,10 +257,13 @@ func (cfg *config) DisconnectClient(ck *Clerk, from []int) {
 
 // Shutdown a server by isolating it
 func (cfg *config) ShutdownServer(i int) {
+	fmt.Println("ooooooooo 1")
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
 
+	fmt.Println("ooo 2")
 	cfg.disconnectUnlocked(i, cfg.All())
+	fmt.Println("ooo 3")
 
 	// disable client connections to the server.
 	// it's important to do this before creating
@@ -268,7 +271,9 @@ func (cfg *config) ShutdownServer(i int) {
 	// the possibility of the server returning a
 	// positive reply to an Append but persisting
 	// the result in the superseded Persister.
+	fmt.Println("ooo 4")
 	cfg.net.DeleteServer(i)
+	fmt.Println("ooo 5")
 
 	// a fresh persister, in case old instance
 	// continues to update the Persister.
@@ -278,12 +283,19 @@ func (cfg *config) ShutdownServer(i int) {
 		cfg.saved[i] = cfg.saved[i].Copy()
 	}
 
+	fmt.Println("ooo 6")
 	kv := cfg.kvservers[i]
+	fmt.Println("ooo 7")
 	if kv != nil {
+		fmt.Println("ooo 8")
 		cfg.mu.Unlock()
+		fmt.Println("ooo 9")
 		kv.Kill()
+		fmt.Println("ooo 10")
 		cfg.mu.Lock()
+		fmt.Println("ooo 11")
 		cfg.kvservers[i] = nil
+		fmt.Println("ooo 12")
 	}
 }
 

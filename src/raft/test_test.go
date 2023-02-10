@@ -1369,12 +1369,12 @@ func TestUnreliableChurn2C(t *testing.T) {
 	internalChurn(t, true)
 }
 
-func TestAppendEntriesReorder2C(t *testing.T) {
+func TestAppendEntriesReorderBug2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
 
-	cfg.begin("Test (2C): Reordering AppendEntries")
+	cfg.begin("Test (2C): Reordering AppendEntries Bug")
 	leader := cfg.checkOneLeader()
 	var term int
 	for i := 1; i < 6; i++ {

@@ -42,7 +42,7 @@ func (rf *Raft) handleRequestVote(event *Event) {
 	}
 
 	if (rf.votedFor.Load() == -1 || rf.votedFor.Load() == request.CandidateId) && rf.areLogsUptoDate(request.LastLogIndex, request.LastLogTerm) {
-		rf.Debug("Logs are up to date and not voted for anyone else yet granting vote....")
+		rf.Debug("Logs are up to date and not voted for anyone else yet granting vote to %v/T%v....", request.CandidateId, request.Term)
 		reply.Term = request.Term
 		reply.VoteGranted = true
 		rf.setVotedFor(request.CandidateId)
@@ -50,7 +50,7 @@ func (rf *Raft) handleRequestVote(event *Event) {
 		return
 	}
 
-	rf.Debug("Logs are not up to date rejecting vote...")
+	rf.Debug("Logs are not up to date rejecting vote for %v/T%v...", request.CandidateId, request.Term)
 	reply.Term = rf.currentTerm.Load()
 	reply.VoteGranted = false
 	event.Response <- reply
@@ -103,16 +103,17 @@ func (rf *Raft) handleSnaphshot(event *Event) {
 
 func (rf *Raft) handleAppendEntries(event *Event) {
 	request := event.Payload.(*AppendEntriesRequest)
-	rf.Debug("handleAppendEntries: %v", len(request.Entries))
-	rf.lock()
-	rf.Debug("-----handleAppendEntries Server: %v Logs: %v", rf.me, rf.logs)
-	rf.unlock()
+	rf.Debug("handleAppendEntries: %v from %v/T%v", len(request.Entries), request.LeaderId, request.Term)
+	// rf.lock()
+	// rf.Debug("-----handleAppendEntries Server: %v Logs: %v", rf.me, rf.logs)
+	// rf.unlock()
 	defer func() {
-		rf.Debug("End of handleAppendEntries: %v", len(request.Entries))
+		rf.Debug("End of handleAppendEntries: %v from %v/T%v", len(request.Entries), request.LeaderId, request.Term)
 	}()
 	rf.resetElectionTimer()
 	reply := &AppendEntriesReply{}
 	if request.Term < rf.currentTerm.Load() {
+		rf.Debug("request.Term: %v < current term: %v", request.Term, rf.currentTerm.Load())
 		reply.Term = rf.currentTerm.Load()
 		reply.Success = false
 		event.Response <- reply
@@ -143,12 +144,14 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 			} else {
 				rf.Debug("entry exists: %v,  rf.getLogEntry(request.PrevLogIndex).Term != request.PrevLogTerm: %v, request.PrevLogIndex == (int(rf.lastSnapshottedIndex.Load()) - 1): %v, rf.lastSnapshottedTerm.Load() != request.PrevLogTerm: %v", entryExists, rf.getLogEntry(request.PrevLogIndex).Term != request.PrevLogTerm, request.PrevLogIndex == (int(rf.lastSnapshottedIndex.Load())-1), rf.lastSnapshottedTerm.Load() != request.PrevLogTerm)
 				rf.Debug("Sending previous term as %v=%v/T%v [2] %v", lastLogIndex, lastLogIndex, rf.getLastLogTerm(), rf.getLogEntry(lastLogIndex))
-				prevTerm = rf.getLastLogTerm()
+				prevTerm = rf.getLogEntry(request.PrevLogIndex - 1).Term
 			}
 			reply.XTerm = prevTerm
-			for i := request.PrevLogIndex; i >= int(rf.lastSnapshottedIndex.Load()); i-- {
+			for i := request.PrevLogIndex - 1; i >= int(rf.lastSnapshottedIndex.Load()); i-- {
 				entry := rf.getLogEntry(i)
 				reply.XIndex = int(entry.Index)
+				rf.Debug("Actually changing previous term as %v/T%v [2] %v", entry.Index, entry.Term, entry)
+
 				if entry.Term != prevTerm {
 					break
 				}
