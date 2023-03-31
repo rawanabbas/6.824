@@ -156,6 +156,36 @@ func checkClntAppends(t *testing.T, clnt int, v string, count int) {
 		lastoff = off
 	}
 }
+func checkClntAppends2(t *testing.T, clnt int, v string, count int, cfg *config) {
+	lastoff := -1
+	for j := 0; j < count; j++ {
+		wanted := "x " + strconv.Itoa(clnt) + " " + strconv.Itoa(j) + " y"
+		off := strings.Index(v, wanted)
+		if off < 0 {
+			t.Log("Missing element", wanted)
+			for i := 0; i < len(cfg.kvservers); i++ {
+				cfg.kvservers[i].lock()
+				t.Log("Server", i, "Key:", clnt, "db", cfg.kvservers[i].db[strconv.Itoa(clnt)])
+				cfg.kvservers[i].unlock()
+			}
+			t.Fatalf("%v missing element %v in Append result %v", clnt, wanted, v)
+		}
+		off1 := strings.LastIndex(v, wanted)
+		if off1 != off {
+			t.Log("Dup element", wanted)
+			for i := 0; i < len(cfg.kvservers); i++ {
+				cfg.kvservers[i].lock()
+				t.Log("Server", i, "Key:", clnt, "db", cfg.kvservers[i].db[strconv.Itoa(clnt)])
+				cfg.kvservers[i].unlock()
+			}
+			t.Fatalf("duplicate element %v in Append result got %v", wanted, v)
+		}
+		if off <= lastoff {
+			t.Fatalf("wrong order for element %v in Append result", wanted)
+		}
+		lastoff = off
+	}
+}
 
 // check that all known appends are present in a value,
 // and are in order for each concurrent client.
@@ -294,14 +324,16 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 				} else if randomkeys && (rand.Int()%1000) < 100 {
 					// we only do this when using random keys, because it would break the
 					// check done after Get() operations
-					// t.Log(cli, "==============Putting", key, nv)
+					t.Log(cli, "==============Putting", key, "=", nv)
 					Put(cfg, myck, key, nv, opLog, cli)
+					t.Log(cli, "==============Put'd", key, "=", nv)
 					j++
 				} else {
 					// log.Printf("%d: client new get %v\n", cli, key)
 					t.Log(ck.leaderId.Load(), j, "==============Getting", key)
 					v := Get(cfg, myck, key, opLog, cli)
-					t.Log(ck.leaderId.Load(), j, "==============Got sth")
+					// t.Log(ck.leaderId.Load(), j, "==============Got sth")
+					t.Log(ck.leaderId.Load(), j, "==============Got sth: ", v)
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
 						t.Fatalf("%v: get wrong value, key %v, wanted:\n%v\n, got\n%v\n", ck.leaderId.Load(), key, last, v)
@@ -338,7 +370,6 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			t.Log("XXXXXXXXXXXXXXXXXXXXXXXXXXX SHUTTING DOWN")
 			for i := 0; i < nservers; i++ {
 				t.Log("XXXXXXXXXXXXXXXXXXXXXXXXXXX SHUTTING DOWN", i)
-				fmt.Println("ooooooooooooooooooooooo", i)
 				cfg.ShutdownServer(i)
 				t.Log("XXXXXXXXXXXXXXXXXXXXXXXXXXX FINISHED SHUTTING DOWN", i)
 			}
@@ -365,10 +396,11 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			// }
 			t.Log("finished reading")
 			key := strconv.Itoa(i)
-			// log.Printf("Check %v for client %d\n", j, i)
+			t.Logf("Check key: %v, j: %v for client %d\n", key, j, i)
 			v := Get(cfg, ck, key, opLog, 0)
 			if !randomkeys {
-				checkClntAppends(t, i, v, j)
+				// checkClntAppends(t, i, v, j)
+				checkClntAppends2(t, i, v, j, cfg)
 			}
 			t.Log("eol")
 		}

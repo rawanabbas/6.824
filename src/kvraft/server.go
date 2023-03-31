@@ -33,10 +33,12 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 	// Your definitions here.
-	db          map[string]string
-	responses   map[int]chan Op
-	snapshot    chan int
-	lastRequest map[int64]int64
+	db                     map[string]string
+	responses              map[int]chan Op
+	snapshot               chan bool
+	lastRequest            map[int64]int64
+	lastAppliedIndex       atomic.Int32
+	lastSnapshotEventIndex atomic.Int32
 }
 
 func (kv *KVServer) Get(request *GetRequest, reply *GetReply) {
@@ -183,25 +185,53 @@ func (kv *KVServer) applier(persister *raft.Persister) {
 		msg := <-kv.applyCh
 		kv.Debug("Received %v on ApplyChannel", msg)
 		if msg.CommandValid {
+			if persister.RaftStateSize() > kv.maxraftstate {
+				if kv.lastSnapshotEventIndex.Load() >= kv.lastAppliedIndex.Load() {
+					kv.Debug("Already sent snapshot event %d", kv.lastSnapshotEventIndex)
+				} else {
+					kv.Debug("triggering snapshot %v, %v", msg.CommandIndex, kv.lastAppliedIndex.Load())
+					select {
+					case kv.snapshot <- true:
+						if msg.CommandIndex > int(kv.lastAppliedIndex.Load()) {
+							kv.lastAppliedIndex.Store(int32(msg.CommandIndex))
+						}
+					default:
+						kv.Debug("snapshotter is busy")
+					}
+				}
+			}
+
 			op := msg.Command.(Op)
 			kv.Debug("Sending on Channel Index %v", msg.CommandIndex)
 
 			kv.lock()
 			rid, ok := kv.lastRequest[op.ClientId]
 			ch, hasChannel := kv.responses[msg.CommandIndex]
-			if !(ok && rid >= op.RequestId) {
+			kv.Debug("ok: %v, rid: %v, op.RequestId: %v, cid: %v, rid < op.RequestId : %v, going? %v", ok, rid, op.RequestId, op.ClientId, rid < op.RequestId, !ok || rid < op.RequestId)
+			if !ok || rid < op.RequestId {
+				if msg.CommandIndex > int(kv.lastAppliedIndex.Load()) {
+					kv.lastAppliedIndex.Store(int32(msg.CommandIndex))
+				}
 				// It is a new request
 				kv.lastRequest[op.ClientId] = op.RequestId
 				switch op.Type {
 				case PutOp:
+					kv.Debug("Put req: %v  key: %v", op.RequestId, op.Key)
 					kv.db[op.Key] = op.Value
 				case AppendOp:
+					kv.Debug("Append req: %v  key: %v", op.RequestId, op.Key)
 					kv.db[op.Key] += op.Value
 				case GetOp:
+					kv.Debug("Get req: %v  key: %v", op.RequestId, op.Key)
 					op.Value = kv.db[op.Key]
 				}
+			} else {
+				kv.Debug("Ignoring! ok: %v, rid: %v, op.RequestId: %v, rid >= op.RequestId: %v", ok, rid, op.RequestId, rid >= op.RequestId)
+
 			}
+
 			kv.unlock()
+
 			if hasChannel {
 				go func(ch chan Op) {
 					ch <- op
@@ -209,43 +239,43 @@ func (kv *KVServer) applier(persister *raft.Persister) {
 			} else {
 				kv.Debug("cant send, no channel")
 			}
-			if kv.maxraftstate >= 0 && persister.RaftStateSize() >= kv.maxraftstate {
-				kv.Debug("Snapshotting!! %v %v --- %v", msg.CommandIndex, persister.RaftStateSize(), kv.maxraftstate)
-				// kv.snapshot <- msg.CommandIndex
-				kv.lock()
-
-				kv.Debug("Sent snap %v", msg.CommandIndex)
-				data, err := kv.generateSnapshot()
-				if err != nil {
-					kv.Error("An error has occured while generating the snapshot!")
-				}
-				kv.Debug("Calling snap %v", msg.CommandIndex)
-				kv.rf.Snapshot(msg.CommandIndex, data)
-				kv.Debug("Called snap %v", msg.CommandIndex)
-				kv.unlock()
-			}
-		} else if msg.SnapshotValid {
-			// TODO:
+		} else if msg.SnapshotValid && msg.SnapshotIndex > int(kv.lastAppliedIndex.Load()) {
 			kv.readSnapshot(msg.Snapshot)
+			kv.lastAppliedIndex.Store(int32(msg.SnapshotIndex))
 		}
 	}
 	kv.Debug("Killed")
 }
 
-func (kv *KVServer) snapshotter() {
+func (kv *KVServer) snapshotter(persister *raft.Persister) {
 	if kv.maxraftstate < 0 {
 		return
 	}
+
 	for !kv.killed() {
-		kv.Debug("=========waiting for kv.snapshot")
-		index := <-kv.snapshot
-		kv.Debug("=========recv'd %v", index)
-		data, err := kv.generateSnapshot()
-		if err != nil {
-			kv.Error("An error has occured while generating the snapshot!")
+		ratio := float64(persister.RaftStateSize()) / float64(kv.maxraftstate)
+		if ratio > 0.9 && kv.lastSnapshotEventIndex.Load() < kv.lastAppliedIndex.Load() {
+			// Raft State Now is too big do SNAPSHOT
+			lastApplied := kv.lastAppliedIndex.Load()
+			kv.Debug("----Snapshotting @ ratio %v | %v", ratio, lastApplied)
+			snapshot, err := kv.generateSnapshot()
+			if err != nil {
+				kv.Error("An error has occured while generating the snapshot")
+				continue
+			}
+			kv.lastSnapshotEventIndex.Store(lastApplied)
+			kv.Debug("----Sending Snapshotting to raft @ ratio %v | %v ? %v", ratio, lastApplied, kv.lastAppliedIndex.Load())
+			kv.rf.Snapshot(int(lastApplied), snapshot)
+			kv.Debug("----Finished Snapshotting @ ratio %v", ratio)
 		}
-		kv.rf.Snapshot(index, data)
-		kv.Debug("finish snap %v", index)
+
+		select {
+		case <-time.After(time.Duration(1-ratio) * 100 * time.Millisecond):
+			// kv.Debug("GOT A TIMEOUT SNAPSHOT TRIGGER")
+		case <-kv.snapshot:
+			// kv.Debug("GOT A SNAPSHOT TRIGGER!")
+		}
+
 	}
 }
 
@@ -279,11 +309,11 @@ func (kv *KVServer) sendToStateMachine(op Op) (Err, *Op) {
 }
 
 func (kv *KVServer) generateSnapshot() ([]byte, error) {
-	// kv.lock()
-	// defer kv.unlock()
+	kv.lock()
+	defer kv.unlock()
 	buff := new(bytes.Buffer)
 	enc := labgob.NewEncoder(buff)
-	if enc.Encode(kv.db) != nil || enc.Encode(kv.lastRequest) != nil {
+	if enc.Encode(kv.db) != nil || enc.Encode(kv.lastRequest) != nil || enc.Encode(kv.lastAppliedIndex.Load()) != nil || enc.Encode(kv.lastSnapshotEventIndex.Load()) != nil {
 		return nil, fmt.Errorf("cannot generate snapshot")
 	}
 	return buff.Bytes(), nil
@@ -292,6 +322,7 @@ func (kv *KVServer) generateSnapshot() ([]byte, error) {
 func (kv *KVServer) readSnapshot(data []byte) {
 	kv.lock()
 	defer kv.unlock()
+	kv.Debug("readSnapshot")
 
 	if data == nil || len(data) < 1 {
 		return
@@ -301,14 +332,19 @@ func (kv *KVServer) readSnapshot(data []byte) {
 	dec := labgob.NewDecoder(buff)
 	var db map[string]string
 	var lastRequest map[int64]int64
-
-	if dec.Decode(&db) != nil || dec.Decode(&lastRequest) != nil {
+	var lastAppliedIndex int32
+	var lastSnapshotEventIndex int32
+	if dec.Decode(&db) != nil || dec.Decode(&lastRequest) != nil || dec.Decode(&lastAppliedIndex) != nil || dec.Decode(&lastSnapshotEventIndex) != nil {
 		kv.Error("Failed to recover snapshot data")
 		return
 	}
+	kv.Debug("readSnapshot got last req: %v", lastRequest)
+	kv.Debug("readSnapshot got db: %v", db)
 
 	kv.db = db
 	kv.lastRequest = lastRequest
+	kv.lastAppliedIndex.Store(lastAppliedIndex)
+	kv.lastSnapshotEventIndex.Store(lastSnapshotEventIndex)
 
 }
 
@@ -327,7 +363,8 @@ func (kv *KVServer) readSnapshot(data []byte) {
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
-	logger.SetDebug(true)
+	// logger.SetDebug(true)
+	logger.SuppressLogs()
 	labgob.Register(Op{})
 
 	SetLoggerPrefixes()
@@ -338,16 +375,18 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.responses = make(map[int]chan Op)
-	kv.snapshot = make(chan int)
+	kv.snapshot = make(chan bool)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.db = make(map[string]string)
 	kv.lastRequest = make(map[int64]int64)
+	kv.lastAppliedIndex.Store(-1)
+	kv.lastSnapshotEventIndex.Store(-2)
 
 	kv.readSnapshot(persister.ReadSnapshot())
 
 	go kv.applier(persister)
-	// go kv.snapshotter()
+	go kv.snapshotter(persister)
 	// You may need initialization code here.
 	return kv
 }

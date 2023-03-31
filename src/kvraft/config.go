@@ -87,6 +87,7 @@ func (cfg *config) LogSize() int {
 	logsize := 0
 	for i := 0; i < cfg.n; i++ {
 		n := cfg.saved[i].RaftStateSize()
+		cfg.t.Logf("Logsize of %v is %v", i, n)
 		if n > logsize {
 			logsize = n
 		}
@@ -124,11 +125,11 @@ func (cfg *config) connectUnlocked(i int, to []int) {
 	}
 }
 
-func (cfg *config) connect(i int, to []int) {
-	cfg.mu.Lock()
-	defer cfg.mu.Unlock()
-	cfg.connectUnlocked(i, to)
-}
+// func (cfg *config) connect(i int, to []int) {
+// 	cfg.mu.Lock()
+// 	defer cfg.mu.Unlock()
+// 	cfg.connectUnlocked(i, to)
+// }
 
 // detach server i from the servers listed in from
 // caller must hold cfg.mu
@@ -152,11 +153,11 @@ func (cfg *config) disconnectUnlocked(i int, from []int) {
 	}
 }
 
-func (cfg *config) disconnect(i int, from []int) {
-	cfg.mu.Lock()
-	defer cfg.mu.Unlock()
-	cfg.disconnectUnlocked(i, from)
-}
+// func (cfg *config) disconnect(i int, from []int) {
+// 	cfg.mu.Lock()
+// 	defer cfg.mu.Unlock()
+// 	cfg.disconnectUnlocked(i, from)
+// }
 
 func (cfg *config) All() []int {
 	all := make([]int, cfg.n)
@@ -257,13 +258,10 @@ func (cfg *config) DisconnectClient(ck *Clerk, from []int) {
 
 // Shutdown a server by isolating it
 func (cfg *config) ShutdownServer(i int) {
-	fmt.Println("ooooooooo 1")
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
 
-	fmt.Println("ooo 2")
 	cfg.disconnectUnlocked(i, cfg.All())
-	fmt.Println("ooo 3")
 
 	// disable client connections to the server.
 	// it's important to do this before creating
@@ -271,9 +269,7 @@ func (cfg *config) ShutdownServer(i int) {
 	// the possibility of the server returning a
 	// positive reply to an Append but persisting
 	// the result in the superseded Persister.
-	fmt.Println("ooo 4")
 	cfg.net.DeleteServer(i)
-	fmt.Println("ooo 5")
 
 	// a fresh persister, in case old instance
 	// continues to update the Persister.
@@ -283,19 +279,12 @@ func (cfg *config) ShutdownServer(i int) {
 		cfg.saved[i] = cfg.saved[i].Copy()
 	}
 
-	fmt.Println("ooo 6")
 	kv := cfg.kvservers[i]
-	fmt.Println("ooo 7")
 	if kv != nil {
-		fmt.Println("ooo 8")
 		cfg.mu.Unlock()
-		fmt.Println("ooo 9")
 		kv.Kill()
-		fmt.Println("ooo 10")
 		cfg.mu.Lock()
-		fmt.Println("ooo 11")
 		cfg.kvservers[i] = nil
-		fmt.Println("ooo 12")
 	}
 }
 
@@ -429,7 +418,7 @@ func (cfg *config) op() {
 // and some performance numbers.
 func (cfg *config) end() {
 	cfg.checkTimeout()
-	if cfg.t.Failed() == false {
+	if !cfg.t.Failed() {
 		t := time.Since(cfg.t0).Seconds()  // real time
 		npeers := cfg.n                    // number of Raft peers
 		nrpc := cfg.rpcTotal() - cfg.rpcs0 // number of RPC sends

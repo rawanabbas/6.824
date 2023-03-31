@@ -110,6 +110,7 @@ type Raft struct {
 	//Utility Flags
 	resetTimer    atomic.Bool
 	stopHeartbeat atomic.Bool
+	beingApplied  atomic.Int32
 }
 
 type SnapshotPayload struct {
@@ -284,37 +285,48 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-func (rf *Raft) applySnap(snapshot []byte) {
-	rf.Debug("Apply snap: last si: %v", rf.lastSnapshottedIndex.Load())
-	rf.applyCh <- ApplyMsg{
+func (rf *Raft) applySnap(snapshot []byte, index int, term int32) {
+	rf.Debug("Apply snap: last si: %v/T%v", rf.lastSnapshottedIndex.Load(), rf.lastSnapshottedTerm.Load())
+	rf.Out("Apply snap: last si: %v/T%v [%v/T%v]", rf.lastSnapshottedIndex.Load(), rf.lastSnapshottedTerm.Load(), index, term)
+	msg := ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      snapshot,
-		SnapshotTerm:  int(rf.lastSnapshottedTerm.Load()),
-		SnapshotIndex: int(rf.lastSnapshottedIndex.Load()) - 1,
+		SnapshotTerm:  int(term),
+		SnapshotIndex: int(index) - 1,
 	}
+	rf.Out("apply snap message: %v", msg)
+	rf.applyCh <- msg
 	rf.Debug("Finish apply snap")
+	// rf.Out("Finish apply snap")
 }
 
 func (rf *Raft) applyLogs() {
-	// rf.snapLock()
-	// defer rf.snapUnlock()
+	rf.Out("Applying logs")
 	rf.Debug("Applying logs")
 	defer func() {
 		rf.Debug("Finished applying logs")
+		rf.Out("Finished applying logs")
 	}()
 	rf.applyLock()
 	defer rf.applyUnlock()
+	if len(rf.logs) == 0 {
+		return
+	}
 	rf.lock()
 	firstIdx := rf.lastSnapshottedIndex.Load()
 
 	messages := []ApplyMsg{}
 	var i int32
-	if rf.lastApplied.Load() < firstIdx {
+	if rf.beingApplied.Load() >= firstIdx {
+		i = rf.beingApplied.Load() + 1
+	} else if rf.lastApplied.Load() < firstIdx {
 		i = firstIdx
 	} else {
 		i = rf.lastApplied.Load() + 1
 	}
-	rf.Debug("First Index: %v lastApplied: %v, lastSnapshottedIndex: %v", firstIdx, rf.lastApplied.Load(), rf.lastSnapshottedIndex.Load())
+	rf.Debug("Being Applied: %v First Index: %v lastApplied: %v, lastSnapshottedIndex: %v", rf.beingApplied, firstIdx, rf.lastApplied.Load(), rf.lastSnapshottedIndex.Load())
+	rf.Out("First Index: %v lastApplied: %v, lastSnapshottedIndex: %v", firstIdx, rf.lastApplied.Load(), rf.lastSnapshottedIndex.Load())
+	var la int
 	for ; i <= rf.commitIndex.Load(); i++ {
 		entry := rf.logs[i-firstIdx]
 		messages = append(messages, ApplyMsg{
@@ -322,14 +334,21 @@ func (rf *Raft) applyLogs() {
 			Command:      entry.Command,
 			CommandIndex: int(entry.Index),
 		})
+		la = int(entry.Index)
 	}
 	rf.Debug("Applying logs xxxxx %v", messages)
+	rf.Out("Applying logs xxxxx %v", messages)
+	rf.beingApplied.Store(int32(la))
 	rf.unlock()
+
 	for _, msg := range messages {
 		rf.Debug("Applying log xxxxx %v", msg)
+		rf.Out("Applying log xxxxx %v", msg)
 		rf.applyCh <- msg
-		rf.lastApplied.Store(int32(msg.CommandIndex))
+		// rf.lastApplied.Store(int32(msg.CommandIndex))
+		rf.setLastApplied(int32(msg.CommandIndex))
 	}
+	rf.beingApplied.Store(-1)
 
 }
 
@@ -347,12 +366,18 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	rf.SnapshotWithReply(index, snapshot, nil)
+}
+
+func (rf *Raft) SnapshotWithReply(index int, snapshot []byte, replyCh chan interface{}) {
 	evtPayload := &SnapshotPayload{
 		Index:    index,
 		Snapshot: snapshot,
 	}
-	evt := rf.createEvent(EVENT_SNAPSHOT, evtPayload, nil)
+	evt := rf.createEvent(EVENT_SNAPSHOT, evtPayload, replyCh)
+	rf.Out("Emitting snapshot %v", index)
 	rf.emit(evt, false)
+	rf.Out("Done emitting snapshot %v", index)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -705,6 +730,7 @@ func (rf *Raft) sendAppendEntriesToAllPeers() {
 			request.LastIncludedTerm = rf.lastSnapshottedTerm.Load()
 			request.Snapshot = rf.persister.ReadSnapshot()
 			rf.unlock()
+			rf.Out("Sending install snapshot to %v because %v < %v", peer, rf.nextIndex[peer].Load(), rf.lastSnapshottedIndex.Load())
 			go rf.sendInstallSnapshot(peer, request, &InstallSnapshotReply{})
 			continue
 		}
@@ -856,6 +882,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.setLastApplied(0)
 	rf.setLastSnapshottedIndex(0)
 	rf.setLastSnapshottedTerm(0)
+	rf.beingApplied.Store(-1)
 	rf.resetTimer.Store(false)
 	rf.eventCh = make(chan *Event)
 	rf.applyCh = applyCh

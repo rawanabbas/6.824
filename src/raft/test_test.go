@@ -9,12 +9,16 @@ package raft
 //
 
 import (
+	"bytes"
 	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"6.824-2022/labgob"
 )
 
 // The tester generously allows solutions to complete elections in one second
@@ -1536,6 +1540,106 @@ func TestSnapshotWithDisconnect2D(t *testing.T) {
 		cfg.rafts[i].lock()
 		// fmt.Println(i, cfg.logs[i])
 		// fmt.Println(i, cfg.rafts[i].logs)
+		cfg.rafts[i].unlock()
+	}
+	cfg.end()
+}
+
+func TestSnapshotInstallAtLastIndex(t *testing.T) {
+	servers := 3
+	name := "TestSnapshotInstallAtLastIndex"
+	unreliable := false
+	cfg := make_config(t, servers, unreliable, true)
+	cfg.t.Log(name)
+	defer cfg.cleanup()
+
+	cfg.begin(name)
+	cfg.one(1, servers, false)
+	leader := cfg.checkOneLeader()
+	other1 := (leader + 1) % servers
+	other2 := (leader + 2) % servers
+	cfg.t.Log("Leader is", leader)
+	snap1Idx := cfg.one(2, servers, false)
+	cfg.one(3, servers, false)
+	cfg.one(4, servers, false)
+	cfg.t.Log("Disconnecting leader: ", leader)
+	cfg.disconnect(leader)
+
+	time.Sleep(1 * time.Second)
+	newLeader := cfg.checkOneLeader()
+	cfg.t.Log("New Leader is", newLeader)
+	cfg.rafts[leader].Start(100)
+	cfg.rafts[leader].Start(101)
+
+	cfg.one(5, servers-1, false)
+	cfg.one(6, servers-1, false)
+	labgob.Register(LogEntry{})
+	generateSnapshot := func(raftIdx int, commandIndex int32) []byte {
+		cfg.t.Logf("Snapshotting command: %v, for node %v", commandIndex, raftIdx)
+		cfg.rafts[raftIdx].lock()
+		defer cfg.rafts[raftIdx].unlock()
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		e.Encode(commandIndex)
+		var xlog []interface{}
+		for j := 0; j <= int(commandIndex); j++ {
+			xlog = append(xlog, cfg.rafts[raftIdx].logs[j])
+		}
+		cfg.t.Logf("Encoding logs: %v", xlog)
+		err := e.Encode(xlog)
+		if err != nil {
+			cfg.t.Fatalf("Couldnt generate snapshot: %v", err)
+
+		}
+		return w.Bytes()
+	}
+
+	clone := func(orig []byte) []byte {
+		x := make([]byte, len(orig))
+		copy(x, orig)
+		return x
+	}
+	// cfg.rafts[leader].Snapshot(snap1Idx, generateSnapshot(leader, int32(snap1Idx)))
+	snap := generateSnapshot(other1, int32(snap1Idx))
+
+	r := bytes.NewBuffer(clone(snap))
+	d := labgob.NewDecoder(r)
+
+	var lastIncludedIndex int
+	if d.Decode(&lastIncludedIndex) != nil {
+		log.Fatalf("snapshot decode error1")
+	}
+	log.Println("ingest1", lastIncludedIndex)
+	var xlog []interface{}
+	x := d.Decode(&xlog)
+	if x != nil {
+		t.Fatal("Bad snapshot", x, xlog)
+	}
+
+	cfg.rafts[other1].Snapshot(snap1Idx, clone(snap))
+	cfg.rafts[other2].Snapshot(snap1Idx, clone(snap))
+	cfg.t.Log("Reconnecting old leader: ", leader)
+	// cfg.connect(leader)
+	cfg.connect(leader)
+	time.Sleep(1 * time.Second)
+	cfg.rafts[newLeader].lock()
+	currentTerm := cfg.rafts[newLeader].currentTerm.Load()
+	request := &InstallSnapshotRequest{}
+	request.Term = currentTerm
+	request.LeaderId = cfg.rafts[newLeader].me
+	request.LastIncludedIndex = int(cfg.rafts[newLeader].lastSnapshottedIndex.Load())
+	request.LastIncludedTerm = cfg.rafts[newLeader].lastSnapshottedTerm.Load()
+	// request.Snapshot = cfg.rafts[newLeader].persister.ReadSnapshot()
+	request.Snapshot = clone(snap)
+	cfg.rafts[newLeader].unlock()
+	cfg.rafts[newLeader].sendInstallSnapshot(leader, request, &InstallSnapshotReply{})
+	time.Sleep(1 * time.Second)
+	cfg.one(7, servers, false)
+
+	for i := 0; i < servers; i++ {
+		cfg.rafts[i].lock()
+		fmt.Println(i, cfg.logs[i])
+		fmt.Println(i, cfg.rafts[i].logs)
 		cfg.rafts[i].unlock()
 	}
 	cfg.end()

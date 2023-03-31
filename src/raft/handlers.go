@@ -76,6 +76,10 @@ func (rf *Raft) handleSnaphshot(event *Event) {
 	snapshot := evtPayload.Snapshot
 	// Your code here (2D).
 	rf.Debug("------------ Snapshot: %v", index)
+	rf.Out("------------ Snapshot: %v", index)
+	defer func() {
+		rf.Out("------------ End of Snapshot: %v", index)
+	}()
 	rf.snapLock()
 	rf.lock()
 	rf.Debug("------------ Snapshot: %v [%v](%v)\n", index, len(rf.logs), rf.lastSnapshottedIndex.Load())
@@ -99,16 +103,23 @@ func (rf *Raft) handleSnaphshot(event *Event) {
 	}
 	state := buff.Bytes()
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
+	if event.Response != nil {
+		go func() {
+			event.Response <- int32(index) + 1
+		}()
+	}
 }
 
 func (rf *Raft) handleAppendEntries(event *Event) {
 	request := event.Payload.(*AppendEntriesRequest)
 	rf.Debug("handleAppendEntries: %v from %v/T%v", len(request.Entries), request.LeaderId, request.Term)
+	rf.Out("handleAppendEntries: %v from %v/T%v", len(request.Entries), request.LeaderId, request.Term)
 	// rf.lock()
 	// rf.Debug("-----handleAppendEntries Server: %v Logs: %v", rf.me, rf.logs)
 	// rf.unlock()
 	defer func() {
 		rf.Debug("End of handleAppendEntries: %v from %v/T%v", len(request.Entries), request.LeaderId, request.Term)
+		rf.Out("End of handleAppendEntries: %v from %v/T%v", len(request.Entries), request.LeaderId, request.Term)
 	}()
 	rf.resetElectionTimer()
 	reply := &AppendEntriesReply{}
@@ -215,6 +226,7 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 		mn := min(int(request.LeaderCommit), rf.getLastLogIndex())
 		rf.setCommitIndex(int32(mn))
 		rf.Debug("applying logs %v, latest entries: %v", mn, request.Entries)
+		rf.Out("applying logs %v [%v], last applied: %v latest entries: %v", mn, len(request.Entries), rf.lastApplied.Load(), request.Entries)
 		go rf.applyLogs()
 		rf.Debug("applied logs")
 	}
@@ -225,7 +237,6 @@ func (rf *Raft) handleAppendEntries(event *Event) {
 
 func (rf *Raft) handleInstallSnapshot(event *Event) {
 	request := event.Payload.(*InstallSnapshotRequest)
-	rf.Debug("handleInstallSnapshot Idx: %v, Term: %v", request.LastIncludedIndex, request.LastIncludedTerm)
 	reply := &InstallSnapshotReply{}
 	reply.Term = rf.currentTerm.Load()
 	rf.resetElectionTimer()
@@ -263,12 +274,21 @@ func (rf *Raft) handleInstallSnapshot(event *Event) {
 	rf.lastApplied.Store(int32(request.LastIncludedIndex) - 1)
 	rf.setCommitIndex(int32(max(request.LastIncludedIndex-1, int(rf.commitIndex.Load()))))
 	event.Response <- reply
+	buff := new(bytes.Buffer)
+	enc := labgob.NewEncoder(buff)
+	if enc.Encode(rf.currentTerm.Load()) != nil || enc.Encode(rf.votedFor.Load()) != nil || enc.Encode(rf.logs) != nil || enc.Encode(rf.lastSnapshottedIndex.Load()) != nil || enc.Encode(rf.lastSnapshottedTerm.Load()) != nil {
+		rf.Error("Failed to encode raft state")
+		return
+	}
+	state := buff.Bytes()
+
+	// state, _ := rf.generatePersistantState()
+	rf.persister.SaveStateAndSnapshot(state, request.Snapshot)
+	rf.Debug("go applySnap, last si: %v , snap: %v  %v|%v", rf.lastSnapshottedIndex.Load(), request.Snapshot, request.LastIncludedIndex, request.LastIncludedTerm)
+	rf.Out("gonil applySnap, last si: %v   %v|%v", rf.lastSnapshottedIndex.Load(), request.LastIncludedIndex, request.LastIncludedTerm)
 	rf.unlock()
 	rf.snapUnlock()
-	state, _ := rf.generatePersistantState()
-	rf.persister.SaveStateAndSnapshot(state, request.Snapshot)
-	rf.Debug("go applySnap, last si: %v , snap: %v  %v|%v", rf.lastSnapshottedIndex.Load(), request.Snapshot, request.LastIncludedTerm, request.LastIncludedTerm)
-	go rf.applySnap(request.Snapshot)
+	go rf.applySnap(request.Snapshot, request.LastIncludedIndex, request.LastIncludedTerm)
 }
 
 func (rf *Raft) handleHeartbeats(event *Event) {
